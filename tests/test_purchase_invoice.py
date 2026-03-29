@@ -21,6 +21,7 @@ mock_frappe.whitelist = lambda *args, **kwargs: (lambda fn: fn)
 
 mock_app = MagicMock()
 mock_app.db = MagicMock()
+mock_app.tenant_db = mock_app.db
 
 mock_microservice = MagicMock()
 mock_microservice_controller = MagicMock()
@@ -33,12 +34,13 @@ sys.modules["frappe_microservice.controller"] = mock_microservice_controller
 
 
 from controllers.purchase_invoice import PurchaseInvoice
-from expense_tracker.api import get_dashboard_summary
+from expense_tracker.api import get_dashboard_summary, _app_db
 
 
 @pytest.fixture(autouse=True)
 def reset_mocks():
     mock_app.db.reset_mock()
+    mock_app.tenant_db.reset_mock()
 
 
 def _supplier_fallback_values(doctype, filters, field):
@@ -221,7 +223,10 @@ def test_dashboard_summary_uses_user_default_company():
     result = get_dashboard_summary()
 
     assert result["currency"] == "AUD"
-    first_query_params = mock_app.db.get_all.call_args_list[0].kwargs.get("filters")
+    # Verify that the correct tenant-aware DB was used
+    assert _app_db() == mock_app.tenant_db
+    
+    first_query_params = mock_app.tenant_db.get_all.call_args_list[0].kwargs.get("filters")
     assert first_query_params == [
         ["company", "=", "Acme Pty Ltd"],
         ["docstatus", "<", 2],
