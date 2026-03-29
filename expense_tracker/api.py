@@ -47,7 +47,7 @@ def _as_number(value):
 
 
 def _app_db():
-    return get_app().db
+    return get_app().tenant_db
 
 
 def _resolve_company():
