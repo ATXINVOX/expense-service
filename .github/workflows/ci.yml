@@ -1,0 +1,95 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop, "version-*"]
+    tags: ["v*"]
+  pull_request:
+    branches: [main, develop, "version-*"]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/atxinvox/frappe-microservice-lib:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install test dependencies
+        run: |
+          pip install pytest
+
+      - name: Run Tests
+        run: |
+          if [ -d tests ]; then PYTHONPATH=. pytest tests/; else echo "No tests folder found"; fi
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Calculate Image Tag & Versions
+        id: vars
+        run: |
+          # Default values
+          TAG="latest"
+          VERSION="version-16"
+
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            TAG="pr-${{ github.event.number }}"
+            # Use base branch version for PRs if it's a version branch
+            if [[ "${{ github.base_ref }}" == version-* ]]; then
+              VERSION="${{ github.base_ref }}"
+            elif [[ "${{ github.base_ref }}" == "develop" ]]; then
+              VERSION="develop"
+            fi
+          elif [[ "${{ github.ref }}" == refs/heads/develop ]]; then
+            TAG="develop"
+            VERSION="develop"
+          elif [[ "${{ github.ref }}" == refs/heads/version-* ]]; then
+            VERSION=$(echo "${{ github.ref }}" | sed 's/refs\/heads\///')
+            TAG="$VERSION"
+          elif [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            TAG="latest"
+            VERSION="version-16"
+          fi
+
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          # Convert repository name to lowercase for GHCR
+          REPO_LOWER=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          echo "image_name=ghcr.io/$REPO_LOWER" >> $GITHUB_OUTPUT
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Containerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          pull: true
+          tags: ${{ steps.vars.outputs.image_name }}:${{ steps.vars.outputs.tag }}
+          build-args: |
+            BASE_TAG=latest
