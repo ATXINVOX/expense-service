@@ -60,6 +60,19 @@ def _resolve_company():
                 if user_company:
                     return user_company
 
+    session = getattr(frappe, "session", None)
+    if session:
+        user = getattr(session, "user", None)
+        if user:
+            db = _app_db()
+            company = db.get_value(
+                "DefaultValue",
+                {"parent": user, "defkey": "company"},
+                "defvalue",
+            )
+            if company:
+                return company
+
     return None
 
 
