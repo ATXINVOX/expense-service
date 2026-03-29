@@ -242,3 +242,32 @@ def test_dashboard_summary_uses_user_default_company():
         ["posting_date", ">=", date.today().replace(day=1)],
         ["posting_date", "<=", date.today()],
     ]
+
+
+def test_dashboard_summary_falls_back_to_session_user_default():
+    """When frappe.defaults is unavailable, resolve company from
+    frappe.session.user via the DefaultValue table."""
+    mock_frappe.defaults = None
+    mock_frappe.session = MagicMock()
+    mock_frappe.session.user = "varun@vyogolabs.tech"
+
+    def db_get_value(doctype, filters, field=None):
+        if doctype == "DefaultValue":
+            return "Session Co Pty Ltd"
+        if doctype == "Company":
+            return "AUD"
+        return None
+
+    mock_app.db.get_value.side_effect = db_get_value
+    mock_app.db.get_all.side_effect = [
+        [{"name": "PI-1", "grand_total": 50.0, "total_taxes_and_charges": 5.0}],
+        [],
+    ]
+
+    result = get_dashboard_summary("varun@vyogolabs.tech")
+
+    assert result["total_spend"] == 50.0
+    assert result["currency"] == "AUD"
+
+    first_query_filters = mock_app.tenant_db.get_all.call_args_list[0].kwargs.get("filters")
+    assert first_query_filters[0] == ["company", "=", "Session Co Pty Ltd"]
