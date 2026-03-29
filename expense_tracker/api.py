@@ -63,8 +63,8 @@ def _resolve_company():
     return None
 
 
-@frappe.whitelist()
-def get_dashboard_summary(from_date=None, to_date=None):
+@get_app().secure_route('/api/method/expense_tracker.api.get_dashboard_summary', methods=['GET'])
+def get_dashboard_summary(user, from_date=None, to_date=None):
     db = _app_db()
     company = _resolve_company()
     if not company:
