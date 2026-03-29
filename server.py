@@ -1,6 +1,5 @@
 from frappe_microservice import create_microservice, setup_controllers
 import os
-import expense_tracker.api  # Register whitelisted custom API method
 
 # Initialize microservice
 app = create_microservice(
@@ -17,6 +16,8 @@ setup_controllers(app, controllers_directory=controllers_dir)
 # Register resources for this service. Item Group is used for expense category grouping.
 app.register_resource("Purchase Invoice")
 app.register_resource("Item Group")
+
+import expense_tracker.api  # Register whitelisted custom API method after app is ready
 
 if __name__ == "__main__":
     app.run()
