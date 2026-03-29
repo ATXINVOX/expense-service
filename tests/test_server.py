@@ -7,9 +7,15 @@ from urllib.parse import quote
 
 def _mock_frappe_microservice(app):
     fake_ms = ModuleType("frappe_microservice")
+    def mock_secure_route(rule, **options):
+        def decorator(f):
+            return f
+        return decorator
+
     fake_ms.create_microservice = MagicMock(return_value=app)
     fake_ms.setup_controllers = MagicMock()
     fake_ms.get_app = MagicMock(return_value=app)
+    app.secure_route.side_effect = mock_secure_route
     fake_controller = ModuleType("frappe_microservice.controller")
     fake_controller.DocumentController = object
 

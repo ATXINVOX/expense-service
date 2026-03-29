@@ -28,6 +28,15 @@ mock_microservice_controller = MagicMock()
 mock_microservice_controller.DocumentController = MockDocumentController
 mock_microservice.get_app.return_value = mock_app
 
+
+def mock_secure_route(rule, **options):
+    def decorator(f):
+        return f
+    return decorator
+
+
+mock_app.secure_route.side_effect = mock_secure_route
+
 sys.modules["frappe"] = mock_frappe
 sys.modules["frappe_microservice"] = mock_microservice
 sys.modules["frappe_microservice.controller"] = mock_microservice_controller
@@ -201,7 +210,7 @@ def test_dashboard_summary_returns_aggregates():
     ]
     mock_app.db.get_value.return_value = "AUD"
 
-    result = get_dashboard_summary()
+    result = get_dashboard_summary("test_user")
 
     assert result["total_spend"] == 2400.0
     assert result["gst_total"] == 218.18
@@ -220,7 +229,7 @@ def test_dashboard_summary_uses_user_default_company():
         [],
     ]
 
-    result = get_dashboard_summary()
+    result = get_dashboard_summary("test_user")
 
     assert result["currency"] == "AUD"
     # Verify that the correct tenant-aware DB was used
