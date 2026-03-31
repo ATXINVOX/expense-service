@@ -14,8 +14,9 @@ def _resolve_company_from_user():
     """Resolve the user's default company from Frappe session defaults.
 
     Checks in order:
-    1. User-level default (parent = session user email)
-    2. System-level default (parent = '__default')
+    1. User-level default (parent = session user email, defkey = 'company')
+    2. User Permission record (allow = 'Company') for the current user
+    3. System-level default (parent = '__default', defkey = 'company')
     """
     user = getattr(getattr(frappe, 'session', None), 'user', None)
 
@@ -27,6 +28,15 @@ def _resolve_company_from_user():
         )
         if user_company:
             return user_company
+
+        # Check User Permission for 'Company' — set during onboarding.
+        permitted = frappe.db.get_value(
+            "User Permission",
+            {"user": user, "allow": "Company"},
+            "for_value",
+        )
+        if permitted:
+            return permitted
 
     # Fall back to the global Frappe system default.
     return frappe.db.get_value(
