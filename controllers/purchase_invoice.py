@@ -81,11 +81,14 @@ def _is_gst_row(tax_row: Dict[str, Any]) -> bool:
 
 
 def _get_default_expense_account(item_code: str, company: str):
-    return frappe.db.get_value(
-        "Item Default",
-        {"parent": item_code, "company": company},
-        "default_expense_account",
-    )
+    try:
+        return frappe.db.get_value(
+            "Item Default",
+            {"parent": item_code, "company": company},
+            "default_expense_account",
+        )
+    except Exception:
+        return None
 
 
 def _get_default_cost_center(company: str):
