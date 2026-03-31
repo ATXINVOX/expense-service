@@ -53,6 +53,8 @@ def reset_mocks():
     mock_frappe.db.reset_mock()
     mock_frappe.get_all.reset_mock()
     mock_frappe.get_doc.reset_mock()
+    mock_app.tenant_db.get_value.side_effect = lambda *args, **kwargs: mock_frappe.db.get_value(*args, **kwargs)
+    mock_app.tenant_db.get_all.side_effect = lambda *args, **kwargs: mock_frappe.get_all(*args, **kwargs)
 
 
 def _default_get_value(doctype, filters, field=None):
@@ -250,8 +252,10 @@ def test_purchase_invoice_auto_creates_item():
 
     doc.before_validate()
 
-    call_args = mock_app.db.insert_doc.call_args
-    created_data = call_args.args[1] if len(call_args.args) > 1 else call_args.kwargs.get('data', {})
+    item_insert = next(
+        call for call in mock_app.db.insert_doc.call_args_list if call.args and call.args[0] == "Item"
+    )
+    created_data = item_insert.args[1] if len(item_insert.args) > 1 else item_insert.kwargs.get('data', {})
     assert created_data["name"] == "fuel"
     assert created_data["item_group"] == "Travel"
     assert created_data["is_purchase_item"] == 1
