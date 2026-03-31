@@ -3,11 +3,38 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 import frappe
+from frappe_microservice import get_app
 from frappe_microservice.controller import DocumentController
+
+
+def _app_db():
+    return get_app().tenant_db
 
 
 DEFAULT_GST_TEMPLATE = "AU GST 10%"
 GST_MARKER = "gst"
+
+
+def _create_system_doc(doctype: str, values: Dict[str, Any], **insert_kwargs):
+    doc = _app_db().insert_doc(doctype, values, ignore_permissions=True, **insert_kwargs)
+    frappe.db.commit()
+    return doc
+
+
+def _company_abbr(company: str) -> str:
+    abbr = _app_db().get_value("Company", company, "abbr")
+    if abbr:
+        return str(abbr)
+
+    payable = _app_db().get_value(
+        "Account",
+        {"company": company, "account_type": "Payable"},
+        "name",
+    )
+    if payable and " - " in str(payable):
+        return str(payable).rsplit(" - ", 1)[-1]
+
+    return "COMP"
 
 
 def _resolve_company_from_user():
@@ -76,19 +103,161 @@ def _is_gst_row(tax_row: Dict[str, Any]) -> bool:
 
 
 def _get_default_expense_account(item_code: str, company: str):
-    return frappe.db.get_value(
-        "Item Default",
-        {"parent": item_code, "company": company},
-        "default_expense_account",
+    try:
+        account = _app_db().get_value(
+            "Item Default",
+            {"parent": item_code, "company": company},
+            "default_expense_account",
+        )
+        if account:
+            return account
+    except Exception:
+        pass
+
+    try:
+        account = _app_db().get_value("Company", company, "default_expense_account")
+        if account:
+            return account
+    except Exception:
+        pass
+
+    rows = _app_db().get_all(
+        "Account",
+        filters={"company": company, "root_type": "Expense", "is_group": 0},
+        fields=["name"],
+        limit=1,
+        order_by="name asc",
     )
+    if rows:
+        return _value(rows[0], "name")
+
+    abbr = _company_abbr(company)
+    root_name = f"Expenses - {abbr}"
+    if not _app_db().get_value("Account", root_name, "name"):
+        _create_system_doc(
+            "Account",
+            {
+                "name": root_name,
+                "account_name": "Expenses",
+                "company": company,
+                "root_type": "Expense",
+                "report_type": "Profit and Loss",
+                "is_group": 1,
+            },
+        )
+
+    account_name = f"General Expenses - {abbr}"
+    if not _app_db().get_value("Account", account_name, "name"):
+        _create_system_doc(
+            "Account",
+            {
+                "name": account_name,
+                "account_name": "General Expenses",
+                "company": company,
+                "root_type": "Expense",
+                "report_type": "Profit and Loss",
+                "parent_account": root_name,
+                "account_type": "Expense Account",
+                "is_group": 0,
+            },
+        )
+
+    return account_name
 
 
 def _get_default_cost_center(company: str):
     for field in ("default_cost_center", "cost_center", "default_cost_center_name"):
-        value = frappe.db.get_value("Company", company, field)
+        try:
+            value = _app_db().get_value("Company", company, field)
+        except Exception:
+            value = None
         if value:
             return value
-    return None
+
+    rows = _app_db().get_all(
+        "Cost Center",
+        filters={"company": company, "is_group": 0},
+        fields=["name"],
+        limit=1,
+        order_by="name asc",
+    )
+    if rows:
+        # Auto-set the found cost center as the default for the company
+        cc_name = _value(rows[0], "name")
+        _app_db().set_value("Company", company, "default_cost_center", cc_name)
+        return cc_name
+
+    abbr = _company_abbr(company)
+    root_name = f"{company} - {abbr}"
+    print(f"DEBUG: root_name={root_name}")
+    if not _app_db().get_value("Cost Center", root_name, "name"):
+        print(f"DEBUG: Creating root cost center")
+        root_doc = _create_system_doc(
+            "Cost Center",
+            {
+                "cost_center_name": company,
+                "company": company,
+                "is_group": 1,
+            },
+            ignore_mandatory=True,
+        )
+        root_name = root_doc.name
+
+    cost_center_name = f"Main - {abbr}"
+    print(f"DEBUG: cost_center_name={cost_center_name}")
+    if not _app_db().get_value("Cost Center", cost_center_name, "name"):
+        print(f"DEBUG: Creating main cost center")
+        leaf_doc = _create_system_doc(
+            "Cost Center",
+            {
+                "cost_center_name": "Main",
+                "company": company,
+                "parent_cost_center": root_name,
+                "is_group": 0,
+            },
+        )
+        cost_center_name = leaf_doc.name
+
+    # Set as default for the company
+    _app_db().set_value("Company", company, "default_cost_center", cost_center_name)
+    return cost_center_name
+
+
+def _ensure_default_payable_account(company: str):
+    """
+    Ensure the company has a default payable account set.
+    If missing, finds or creates 'Accounts Payable'.
+    """
+    fields = ["default_payable_account", "abbr", "default_currency"]
+    company_data = _app_db().get_all("Company", filters={"name": company}, fields=fields, limit=1)
+    if not company_data:
+        return
+        
+    data = company_data[0]
+    if data.get("default_payable_account"):
+        return
+
+    abbr = data.get("abbr") or _company_abbr(company)
+    
+    # Try find existing
+    existing = _app_db().get_all(
+        "Account",
+        filters={"company": company, "account_type": "Payable", "is_group": 0},
+        fields=["name"],
+        limit=1
+    )
+    if not existing:
+        # Fallback to name search
+        existing = _app_db().get_all(
+            "Account",
+            filters={"company": company, "account_name": ["like", "Accounts Payable%"], "is_group": 0},
+            fields=["name"],
+            limit=1
+        )
+        
+    if existing:
+        _app_db().set_value("Company", company, "default_payable_account", existing[0].get("name"))
+        return
 
 
 def _find_gst_template():
@@ -184,11 +353,11 @@ def _resolve_supplier_name(supplier_value):
     if not supplier_value:
         return None
 
-    existing = frappe.db.get_value("Supplier", supplier_value, "name")
+    existing = _app_db().get_value("Supplier", supplier_value, "name")
     if existing:
         return existing
 
-    named = frappe.db.get_value("Supplier", {"supplier_name": supplier_value}, "name")
+    named = _app_db().get_value("Supplier", {"supplier_name": supplier_value}, "name")
     if named:
         return named
 
@@ -214,18 +383,19 @@ def _create_supplier(supplier_name: str, supplier_group: str | None):
     name = base_name
 
     for i in range(1, 20):
-        existing = frappe.db.get_value("Supplier", name, "name")
+        existing = _app_db().get_value("Supplier", name, "name")
         if not existing:
             break
         name = _normalize_name(f"{base_name}-{i}", fallback="Supplier", max_length=95)
 
-    doc = frappe.get_doc({
-        "doctype": "Supplier",
+    doc = _app_db().insert_doc("Supplier", {
         "name": name,
         "supplier_name": supplier_name,
         "supplier_group": supplier_group,
-    })
-    doc.insert(ignore_permissions=True)
+    }, ignore_permissions=True)
+    # Commit immediately so ERPNext link validation (run during Purchase Invoice
+    # doc.insert()) can find this record on the same DB connection.
+    frappe.db.commit()
     return doc.name
 
 
@@ -235,21 +405,40 @@ def _resolve_item_code(item_name: str, item_group: str) -> str:
     if not item_name:
         return item_name
 
-    existing = frappe.db.get_value("Item", item_name, "name")
+    existing = _app_db().get_value("Item", item_name, "name")
     if existing:
         return existing
 
-    doc = frappe.get_doc({
-        "doctype": "Item",
+    doc = _app_db().insert_doc("Item", {
         "name": item_name,
+        "item_code": item_name,
         "item_name": item_name,
         "item_group": item_group or "All Item Groups",
         "is_purchase_item": 1,
         "is_sales_item": 0,
+        "is_stock_item": 0,
+        "is_fixed_asset": 0,
         "stock_uom": "Nos",
-    })
-    doc.insert(ignore_permissions=True)
+    }, ignore_permissions=True)
+    # Commit immediately so ERPNext link validation can find this record.
+    frappe.db.commit()
     return doc.name
+
+
+def _resolve_item_identity(item: Any) -> tuple[str | None, str | None]:
+    item_group = _value(item, "item_group", None) or "All Item Groups"
+    item_code = _value(item, "item_code")
+    item_name = _value(item, "item_name")
+
+    preferred_name = str(item_name).strip() if item_name else None
+    candidate_code = str(item_code).strip() if item_code else None
+
+    if preferred_name:
+        if not candidate_code or candidate_code == item_group:
+            return preferred_name, item_group
+        return preferred_name, item_group
+
+    return candidate_code, item_group
 
 
 class PurchaseInvoice(DocumentController):
@@ -265,6 +454,10 @@ class PurchaseInvoice(DocumentController):
             return
         _set_value(self, "company", company)
 
+        # Bootstrap company defaults if missing
+        _get_default_cost_center(company)
+        _ensure_default_payable_account(company)
+
         # Auto-create supplier so ERPNext's link validation passes.
         supplier = _resolve_supplier_name(_value(self, "supplier", None))
         if supplier:
@@ -274,14 +467,15 @@ class PurchaseInvoice(DocumentController):
         items = _value(self, "items", []) or []
 
         for item in items:
-            item_code = _value(item, "item_code")
-            item_group = _value(item, "item_group", None) or "All Item Groups"
+            item_code, item_group = _resolve_item_identity(item)
             if not item_code:
                 continue
 
             # Auto-create Item so ERPNext's link validation passes.
             resolved_code = _resolve_item_code(item_code, item_group)
             _set_value(item, "item_code", resolved_code)
+            if _value(item, "item_name"):
+                _set_value(item, "item_name", item_code)
 
             expense_account = _get_default_expense_account(resolved_code, company)
             if expense_account:
