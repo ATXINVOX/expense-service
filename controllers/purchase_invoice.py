@@ -144,6 +144,7 @@ def _get_default_expense_account(item_code: str, company: str):
                 "report_type": "Profit and Loss",
                 "is_group": 1,
             },
+            ignore_mandatory=True,
         )
 
     account_name = f"General Expenses - {abbr}"
@@ -160,6 +161,7 @@ def _get_default_expense_account(item_code: str, company: str):
                 "account_type": "Expense Account",
                 "is_group": 0,
             },
+            ignore_mandatory=True,
         )
 
     return account_name
@@ -258,6 +260,22 @@ def _ensure_default_payable_account(company: str):
     if existing:
         _app_db().set_value("Company", company, "default_payable_account", existing[0].get("name"))
         return
+
+    # Not found, create it
+    _create_system_doc(
+        "Account",
+        {
+            "account_name": "Accounts Payable",
+            "company": company,
+            "root_type": "Liability",
+            "report_type": "Balance Sheet",
+            "account_type": "Payable",
+            "is_group": 0,
+            "parent_account": f"Current Liabilities - {abbr}",
+        },
+        ignore_mandatory=True,
+    )
+    # Note: We don't set it on company here, as the NEXT save/validate will find it
 
 
 def _find_gst_template():
