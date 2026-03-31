@@ -11,13 +11,27 @@ GST_MARKER = "gst"
 
 
 def _resolve_company_from_user():
-    """Resolve the user's default company from Frappe session defaults."""
+    """Resolve the user's default company from Frappe session defaults.
+
+    Checks in order:
+    1. User-level default (parent = session user email)
+    2. System-level default (parent = '__default')
+    """
     user = getattr(getattr(frappe, 'session', None), 'user', None)
-    if not user or user == 'Guest':
-        return None
+
+    if user and user != 'Guest':
+        user_company = frappe.db.get_value(
+            "DefaultValue",
+            {"parent": user, "defkey": "company"},
+            "defvalue",
+        )
+        if user_company:
+            return user_company
+
+    # Fall back to the global Frappe system default.
     return frappe.db.get_value(
         "DefaultValue",
-        {"parent": user, "defkey": "company"},
+        {"parent": "__default", "defkey": "company"},
         "defvalue",
     ) or None
 
