@@ -16,6 +16,7 @@ GST_MARKER = "gst"
 
 
 def _create_system_doc(doctype: str, values: Dict[str, Any], **insert_kwargs):
+    print(f"DEBUG: _create_system_doc calling insert_doc for {doctype} with values keys {list(values.keys())} and insert_kwargs {insert_kwargs}")
     doc = _app_db().insert_doc(doctype, values, ignore_permissions=True, **insert_kwargs)
     frappe.db.commit()
     return doc
@@ -144,6 +145,7 @@ def _get_default_expense_account(item_code: str, company: str):
                 "report_type": "Profit and Loss",
                 "is_group": 1,
             },
+            ignore_mandatory=True,
         )
 
     account_name = f"General Expenses - {abbr}"
@@ -160,6 +162,7 @@ def _get_default_expense_account(item_code: str, company: str):
                 "account_type": "Expense Account",
                 "is_group": 0,
             },
+            ignore_mandatory=True,
         )
 
     return account_name
@@ -184,7 +187,7 @@ def _get_default_cost_center(company: str):
     if rows:
         # Auto-set the found cost center as the default for the company
         cc_name = _value(rows[0], "name")
-        _app_db().set_value("Company", company, "default_cost_center", cc_name)
+        _app_db().set_value("Company", company, "cost_center", cc_name)
         return cc_name
 
     abbr = _company_abbr(company)
@@ -219,7 +222,7 @@ def _get_default_cost_center(company: str):
         cost_center_name = leaf_doc.name
 
     # Set as default for the company
-    _app_db().set_value("Company", company, "default_cost_center", cost_center_name)
+    _app_db().set_value("Company", company, "cost_center", cost_center_name)
     return cost_center_name
 
 
@@ -258,6 +261,22 @@ def _ensure_default_payable_account(company: str):
     if existing:
         _app_db().set_value("Company", company, "default_payable_account", existing[0].get("name"))
         return
+
+    # Not found, create it
+    _create_system_doc(
+        "Account",
+        {
+            "account_name": "Accounts Payable",
+            "company": company,
+            "root_type": "Liability",
+            "report_type": "Balance Sheet",
+            "account_type": "Payable",
+            "is_group": 0,
+            "parent_account": f"Current Liabilities - {abbr}",
+        },
+        ignore_mandatory=True,
+    )
+    # Note: We don't set it on company here, as the NEXT save/validate will find it
 
 
 def _find_gst_template():
@@ -475,24 +494,29 @@ class PurchaseInvoice(DocumentController):
             _set_value(self, "supplier", supplier)
 
         cost_center = _get_default_cost_center(company)
-        items = _value(self, "items", []) or []
-
-        for item in items:
-            item_code, item_group = _resolve_item_identity(item)
+        raw_items = _serialise(self).get("items", []) or []
+        self.set("items", [])
+        
+        for item_data in raw_items:
+            item_code, item_group = _resolve_item_identity(item_data)
             if not item_code:
+                # Add back even if unresolvable to preserve original data
+                self.append("items", item_data)
                 continue
 
             # Auto-create Item so ERPNext's link validation passes.
             resolved_code = _resolve_item_code(item_code, item_group)
-            _set_value(item, "item_code", resolved_code)
-            if _value(item, "item_name"):
-                _set_value(item, "item_name", item_code)
+            _set_value(item_data, "item_code", resolved_code)
+            if _value(item_data, "item_name"):
+                _set_value(item_data, "item_name", item_code)
 
             expense_account = _get_default_expense_account(resolved_code, company)
             if expense_account:
-                _set_value(item, "expense_account", expense_account)
+                _set_value(item_data, "expense_account", expense_account)
             if cost_center:
-                _set_value(item, "cost_center", cost_center)
+                _set_value(item_data, "cost_center", cost_center)
+            
+            self.append("items", item_data)
 
         # Resolve the real GST template that exists in this ERPNext instance.
         # Mobile sends taxes_and_charges as non-empty string to signal GST intent.
@@ -506,10 +530,16 @@ class PurchaseInvoice(DocumentController):
             gst_template = _find_gst_template()
             if gst_template:
                 _set_value(self, "taxes_and_charges", gst_template)
-                self.taxes = manual_taxes + _gst_template_rows(company, gst_template)
+                self.set("taxes", [])
+                for row in manual_taxes + _gst_template_rows(company, gst_template):
+                    self.append("taxes", row)
             else:
                 _set_value(self, "taxes_and_charges", "")
-                self.taxes = manual_taxes
+                self.set("taxes", [])
+                for row in manual_taxes:
+                    self.append("taxes", row)
         else:
             _set_value(self, "taxes_and_charges", "")
-            self.taxes = manual_taxes
+            self.set("taxes", [])
+            for row in manual_taxes:
+                self.append("taxes", row)
