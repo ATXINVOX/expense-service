@@ -21,6 +21,7 @@ mock_frappe.whitelist = lambda *args, **kwargs: (lambda fn: fn)
 
 mock_app = MagicMock()
 mock_app.db = MagicMock()
+mock_app.db.exists.return_value = False
 mock_app.tenant_db = mock_app.db
 
 mock_microservice = MagicMock()
@@ -49,6 +50,9 @@ from expense_tracker.api import get_dashboard_summary, _app_db
 @pytest.fixture(autouse=True)
 def reset_mocks():
     mock_app.db.reset_mock()
+    mock_app.db.get_all.side_effect = None
+    mock_app.db.get_value.side_effect = None
+    mock_app.db.exists.return_value = False
     mock_app.tenant_db.reset_mock()
     mock_frappe.db.reset_mock()
     mock_frappe.get_all.reset_mock()
@@ -365,3 +369,38 @@ def test_dashboard_summary_falls_back_to_session_user_default():
 
     first_query_filters = mock_app.tenant_db.get_all.call_args_list[0].kwargs.get("filters")
     assert first_query_filters[0] == ["company", "=", "Session Co Pty Ltd"]
+
+
+def test_purchase_invoice_bootstraps_missing_cost_center():
+    # Setup: Company has no default cost center
+    def db_get_value(doctype, filters, field=None):
+        if doctype == "Company" and filters == "Acme Pty Ltd":
+            if field == "default_cost_center": return None
+            if field == "abbr": return "ACME"
+        return None
+
+    mock_frappe.db.get_value.side_effect = db_get_value
+    mock_frappe.get_all.return_value = [] # No existing cost centers
+    mock_app.db.exists.return_value = False
+    
+    # Mock insert_doc to return a doc with a name
+    mock_cc_doc = MagicMock()
+    mock_cc_doc.name = "Main - ACME"
+    mock_app.db.insert_doc.return_value = mock_cc_doc
+
+    doc = PurchaseInvoice({
+        "doctype": "Purchase Invoice",
+        "company": "Acme Pty Ltd",
+        "items": [{"item_code": "Fuel"}]
+    })
+
+    # Action
+    doc.before_validate()
+
+    # Verify: Root and Main CCs should be created
+    assert mock_app.db.insert_doc.call_count >= 2
+    
+    # Verify: Company should be updated with Main CC
+    mock_app.db.set_value.assert_any_call("Company", "Acme Pty Ltd", "default_cost_center", "Main - ACME")
+
+

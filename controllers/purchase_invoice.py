@@ -182,11 +182,16 @@ def _get_default_cost_center(company: str):
         order_by="name asc",
     )
     if rows:
-        return _value(rows[0], "name")
+        # Auto-set the found cost center as the default for the company
+        cc_name = _value(rows[0], "name")
+        _app_db().set_value("Company", company, "default_cost_center", cc_name)
+        return cc_name
 
     abbr = _company_abbr(company)
     root_name = f"{company} - {abbr}"
+    print(f"DEBUG: root_name={root_name}")
     if not _app_db().get_value("Cost Center", root_name, "name"):
+        print(f"DEBUG: Creating root cost center")
         root_doc = _create_system_doc(
             "Cost Center",
             {
@@ -199,7 +204,9 @@ def _get_default_cost_center(company: str):
         root_name = root_doc.name
 
     cost_center_name = f"Main - {abbr}"
+    print(f"DEBUG: cost_center_name={cost_center_name}")
     if not _app_db().get_value("Cost Center", cost_center_name, "name"):
+        print(f"DEBUG: Creating main cost center")
         leaf_doc = _create_system_doc(
             "Cost Center",
             {
@@ -211,8 +218,46 @@ def _get_default_cost_center(company: str):
         )
         cost_center_name = leaf_doc.name
 
+    # Set as default for the company
+    _app_db().set_value("Company", company, "default_cost_center", cost_center_name)
     return cost_center_name
-    return None
+
+
+def _ensure_default_payable_account(company: str):
+    """
+    Ensure the company has a default payable account set.
+    If missing, finds or creates 'Accounts Payable'.
+    """
+    fields = ["default_payable_account", "abbr", "default_currency"]
+    company_data = _app_db().get_all("Company", filters={"name": company}, fields=fields, limit=1)
+    if not company_data:
+        return
+        
+    data = company_data[0]
+    if data.get("default_payable_account"):
+        return
+
+    abbr = data.get("abbr") or _company_abbr(company)
+    
+    # Try find existing
+    existing = _app_db().get_all(
+        "Account",
+        filters={"company": company, "account_type": "Payable", "is_group": 0},
+        fields=["name"],
+        limit=1
+    )
+    if not existing:
+        # Fallback to name search
+        existing = _app_db().get_all(
+            "Account",
+            filters={"company": company, "account_name": ["like", "Accounts Payable%"], "is_group": 0},
+            fields=["name"],
+            limit=1
+        )
+        
+    if existing:
+        _app_db().set_value("Company", company, "default_payable_account", existing[0].get("name"))
+        return
 
 
 def _find_gst_template():
@@ -408,6 +453,10 @@ class PurchaseInvoice(DocumentController):
         if not company:
             return
         _set_value(self, "company", company)
+
+        # Bootstrap company defaults if missing
+        _get_default_cost_center(company)
+        _ensure_default_payable_account(company)
 
         # Auto-create supplier so ERPNext's link validation passes.
         supplier = _resolve_supplier_name(_value(self, "supplier", None))
