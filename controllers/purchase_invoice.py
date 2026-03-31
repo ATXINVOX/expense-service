@@ -16,18 +16,17 @@ GST_MARKER = "gst"
 
 
 def _create_system_doc(doctype: str, values: Dict[str, Any]):
-    doc = frappe.get_doc({"doctype": doctype, **values})
-    doc.insert(ignore_permissions=True)
+    doc = _app_db().insert_doc(doctype, values, ignore_permissions=True)
     frappe.db.commit()
     return doc
 
 
 def _company_abbr(company: str) -> str:
-    abbr = frappe.db.get_value("Company", company, "abbr")
+    abbr = _app_db().get_value("Company", company, "abbr")
     if abbr:
         return str(abbr)
 
-    payable = frappe.db.get_value(
+    payable = _app_db().get_value(
         "Account",
         {"company": company, "account_type": "Payable"},
         "name",
@@ -116,13 +115,13 @@ def _get_default_expense_account(item_code: str, company: str):
         pass
 
     try:
-        account = frappe.db.get_value("Company", company, "default_expense_account")
+        account = _app_db().get_value("Company", company, "default_expense_account")
         if account:
             return account
     except Exception:
         pass
 
-    rows = frappe.get_all(
+    rows = _app_db().get_all(
         "Account",
         filters={"company": company, "root_type": "Expense", "is_group": 0},
         fields=["name"],
@@ -134,7 +133,7 @@ def _get_default_expense_account(item_code: str, company: str):
 
     abbr = _company_abbr(company)
     root_name = f"Expenses - {abbr}"
-    if not frappe.db.get_value("Account", root_name, "name"):
+    if not _app_db().get_value("Account", root_name, "name"):
         _create_system_doc(
             "Account",
             {
@@ -148,7 +147,7 @@ def _get_default_expense_account(item_code: str, company: str):
         )
 
     account_name = f"General Expenses - {abbr}"
-    if not frappe.db.get_value("Account", account_name, "name"):
+    if not _app_db().get_value("Account", account_name, "name"):
         _create_system_doc(
             "Account",
             {
@@ -169,13 +168,13 @@ def _get_default_expense_account(item_code: str, company: str):
 def _get_default_cost_center(company: str):
     for field in ("default_cost_center", "cost_center", "default_cost_center_name"):
         try:
-            value = frappe.db.get_value("Company", company, field)
+            value = _app_db().get_value("Company", company, field)
         except Exception:
             value = None
         if value:
             return value
 
-    rows = frappe.get_all(
+    rows = _app_db().get_all(
         "Cost Center",
         filters={"company": company, "is_group": 0},
         fields=["name"],
@@ -187,7 +186,7 @@ def _get_default_cost_center(company: str):
 
     abbr = _company_abbr(company)
     root_name = f"{company} - {abbr}"
-    if not frappe.db.get_value("Cost Center", root_name, "name"):
+    if not _app_db().get_value("Cost Center", root_name, "name"):
         _create_system_doc(
             "Cost Center",
             {
@@ -199,7 +198,7 @@ def _get_default_cost_center(company: str):
         )
 
     cost_center_name = f"Main - {abbr}"
-    if not frappe.db.get_value("Cost Center", cost_center_name, "name"):
+    if not _app_db().get_value("Cost Center", cost_center_name, "name"):
         _create_system_doc(
             "Cost Center",
             {
@@ -308,11 +307,11 @@ def _resolve_supplier_name(supplier_value):
     if not supplier_value:
         return None
 
-    existing = frappe.db.get_value("Supplier", supplier_value, "name")
+    existing = _app_db().get_value("Supplier", supplier_value, "name")
     if existing:
         return existing
 
-    named = frappe.db.get_value("Supplier", {"supplier_name": supplier_value}, "name")
+    named = _app_db().get_value("Supplier", {"supplier_name": supplier_value}, "name")
     if named:
         return named
 
@@ -338,7 +337,7 @@ def _create_supplier(supplier_name: str, supplier_group: str | None):
     name = base_name
 
     for i in range(1, 20):
-        existing = frappe.db.get_value("Supplier", name, "name")
+        existing = _app_db().get_value("Supplier", name, "name")
         if not existing:
             break
         name = _normalize_name(f"{base_name}-{i}", fallback="Supplier", max_length=95)
@@ -360,7 +359,7 @@ def _resolve_item_code(item_name: str, item_group: str) -> str:
     if not item_name:
         return item_name
 
-    existing = frappe.db.get_value("Item", item_name, "name")
+    existing = _app_db().get_value("Item", item_name, "name")
     if existing:
         return existing
 
