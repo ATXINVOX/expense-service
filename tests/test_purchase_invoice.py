@@ -50,6 +50,9 @@ from expense_tracker.api import get_dashboard_summary, _app_db
 def reset_mocks():
     mock_app.db.reset_mock()
     mock_app.tenant_db.reset_mock()
+    mock_frappe.db.reset_mock()
+    mock_frappe.get_all.reset_mock()
+    mock_frappe.get_doc.reset_mock()
 
 
 def _default_get_value(doctype, filters, field=None):
@@ -109,8 +112,8 @@ def _supplier_fallback_values(doctype, filters=None, field=None):
 
 
 def test_purchase_invoice_before_validate_sets_default_accounts_and_taxes():
-    mock_app.db.get_value.side_effect = _default_get_value
-    mock_app.db.get_all.side_effect = _default_get_all
+    mock_frappe.db.get_value.side_effect = _default_get_value
+    mock_frappe.get_all.side_effect = _default_get_all
 
     doc = PurchaseInvoice(
         {
@@ -136,8 +139,8 @@ def test_purchase_invoice_before_validate_sets_default_accounts_and_taxes():
 
 
 def test_purchase_invoice_without_gst_keeps_non_gst_taxes():
-    mock_app.db.get_value.side_effect = _default_get_value
-    mock_app.db.get_all.side_effect = _default_get_all
+    mock_frappe.db.get_value.side_effect = _default_get_value
+    mock_frappe.get_all.side_effect = _default_get_all
 
     doc = PurchaseInvoice(
         {
@@ -156,8 +159,8 @@ def test_purchase_invoice_without_gst_keeps_non_gst_taxes():
 
 
 def test_purchase_invoice_internal_cost_center_is_forced():
-    mock_app.db.get_value.side_effect = _default_get_value
-    mock_app.db.get_all.side_effect = _default_get_all
+    mock_frappe.db.get_value.side_effect = _default_get_value
+    mock_frappe.get_all.side_effect = _default_get_all
 
     doc = PurchaseInvoice(
         {
@@ -173,7 +176,9 @@ def test_purchase_invoice_internal_cost_center_is_forced():
 
 
 def test_purchase_invoice_auto_creates_supplier():
-    mock_app.db.insert.return_value = {"name": "SUP-NEW"}
+    mock_supplier_doc = MagicMock()
+    mock_supplier_doc.name = "SUP-NEW"
+    mock_frappe.get_doc.return_value = mock_supplier_doc
 
     def db_get_value(doctype, filters=None, field=None):
         if doctype == "DefaultValue":
@@ -192,8 +197,8 @@ def test_purchase_invoice_auto_creates_supplier():
             return "10000 - Fuel"
         return None
 
-    mock_app.db.get_value.side_effect = db_get_value
-    mock_app.db.get_all.side_effect = _default_get_all
+    mock_frappe.db.get_value.side_effect = db_get_value
+    mock_frappe.get_all.side_effect = _default_get_all
 
     doc = PurchaseInvoice(
         {
@@ -207,13 +212,15 @@ def test_purchase_invoice_auto_creates_supplier():
     doc.before_validate()
 
     assert doc.supplier == "SUP-NEW"
-    created_supplier = mock_app.db.insert.call_args.args[0]
-    assert created_supplier["supplier_name"] == "New Supplier"
-    assert created_supplier["supplier_group"] == "General"
+    created_dict = mock_frappe.get_doc.call_args.args[0]
+    assert created_dict["supplier_name"] == "New Supplier"
+    assert created_dict["supplier_group"] == "General"
 
 
 def test_purchase_invoice_auto_creates_item():
-    mock_app.db.insert.return_value = {"name": "fuel"}
+    mock_item_doc = MagicMock()
+    mock_item_doc.name = "fuel"
+    mock_frappe.get_doc.return_value = mock_item_doc
 
     def db_get_value(doctype, filters=None, field=None):
         if doctype == "DefaultValue":
@@ -228,8 +235,8 @@ def test_purchase_invoice_auto_creates_item():
             return "BP"
         return None
 
-    mock_app.db.get_value.side_effect = db_get_value
-    mock_app.db.get_all.side_effect = _default_get_all
+    mock_frappe.db.get_value.side_effect = db_get_value
+    mock_frappe.get_all.side_effect = _default_get_all
 
     doc = PurchaseInvoice(
         {
@@ -242,10 +249,10 @@ def test_purchase_invoice_auto_creates_item():
 
     doc.before_validate()
 
-    insert_call = mock_app.db.insert.call_args.args[0]
-    assert insert_call["name"] == "fuel"
-    assert insert_call["item_group"] == "Travel"
-    assert insert_call["is_purchase_item"] == 1
+    created_dict = mock_frappe.get_doc.call_args.args[0]
+    assert created_dict["name"] == "fuel"
+    assert created_dict["item_group"] == "Travel"
+    assert created_dict["is_purchase_item"] == 1
     assert doc.items[0]["item_code"] == "fuel"
 
 
@@ -259,8 +266,8 @@ def test_purchase_invoice_company_resolved_from_session():
             return "Session CC"
         return None
 
-    mock_app.db.get_value.side_effect = db_get_value
-    mock_app.db.get_all.side_effect = _default_get_all
+    mock_frappe.db.get_value.side_effect = db_get_value
+    mock_frappe.get_all.side_effect = _default_get_all
 
     doc = PurchaseInvoice(
         {
