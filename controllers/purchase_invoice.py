@@ -483,24 +483,29 @@ class PurchaseInvoice(DocumentController):
             _set_value(self, "supplier", supplier)
 
         cost_center = _get_default_cost_center(company)
-        items = _value(self, "items", []) or []
-
-        for item in items:
-            item_code, item_group = _resolve_item_identity(item)
+        raw_items = _serialise(self).get("items", []) or []
+        self.set("items", [])
+        
+        for item_data in raw_items:
+            item_code, item_group = _resolve_item_identity(item_data)
             if not item_code:
+                # Add back even if unresolvable to preserve original data
+                self.append("items", item_data)
                 continue
 
             # Auto-create Item so ERPNext's link validation passes.
             resolved_code = _resolve_item_code(item_code, item_group)
-            _set_value(item, "item_code", resolved_code)
-            if _value(item, "item_name"):
-                _set_value(item, "item_name", item_code)
+            _set_value(item_data, "item_code", resolved_code)
+            if _value(item_data, "item_name"):
+                _set_value(item_data, "item_name", item_code)
 
             expense_account = _get_default_expense_account(resolved_code, company)
             if expense_account:
-                _set_value(item, "expense_account", expense_account)
+                _set_value(item_data, "expense_account", expense_account)
             if cost_center:
-                _set_value(item, "cost_center", cost_center)
+                _set_value(item_data, "cost_center", cost_center)
+            
+            self.append("items", item_data)
 
         # Resolve the real GST template that exists in this ERPNext instance.
         # Mobile sends taxes_and_charges as non-empty string to signal GST intent.
