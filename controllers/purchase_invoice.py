@@ -184,7 +184,7 @@ def _get_default_cost_center(company: str):
     if rows:
         # Auto-set the found cost center as the default for the company
         cc_name = _value(rows[0], "name")
-        _app_db().set_value("Company", company, "default_cost_center", cc_name)
+        _app_db().set_value("Company", company, "cost_center", cc_name)
         return cc_name
 
     abbr = _company_abbr(company)
@@ -219,7 +219,7 @@ def _get_default_cost_center(company: str):
         cost_center_name = leaf_doc.name
 
     # Set as default for the company
-    _app_db().set_value("Company", company, "default_cost_center", cost_center_name)
+    _app_db().set_value("Company", company, "cost_center", cost_center_name)
     return cost_center_name
 
 
