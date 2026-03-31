@@ -229,6 +229,9 @@ def _create_supplier(supplier_name: str, supplier_group: str | None):
         "supplier_name": supplier_name,
         "supplier_group": supplier_group,
     }, ignore_permissions=True)
+    # Commit immediately so ERPNext link validation (run during Purchase Invoice
+    # doc.insert()) can find this record on the same DB connection.
+    frappe.db.commit()
     return doc.name
 
 
@@ -250,6 +253,8 @@ def _resolve_item_code(item_name: str, item_group: str) -> str:
         "is_sales_item": 0,
         "stock_uom": "Nos",
     }, ignore_permissions=True)
+    # Commit immediately so ERPNext link validation can find this record.
+    frappe.db.commit()
     return doc.name
 
 
