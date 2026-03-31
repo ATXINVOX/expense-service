@@ -50,62 +50,76 @@ from expense_tracker.api import get_dashboard_summary, _app_db
 def reset_mocks():
     mock_app.db.reset_mock()
     mock_app.tenant_db.reset_mock()
+    mock_frappe.db.reset_mock()
+    mock_frappe.get_all.reset_mock()
+    mock_frappe.get_doc.reset_mock()
 
 
-def _supplier_fallback_values(doctype, filters, field):
+def _default_get_value(doctype, filters, field=None):
+    """Shared get_value mock used by most tests."""
+    if doctype == "DefaultValue":
+        # _resolve_company_from_user: no user default → fall back to doc company
+        return None
+    if doctype == "Item":
+        # _resolve_item_code: item already exists — return it as-is
+        return filters
     if doctype == "Item Default":
-        if filters.get("parent") == "Fuel":
+        parent = filters.get("parent") if isinstance(filters, dict) else filters
+        if parent == "Fuel":
             return "10000 - Fuel"
-        if filters.get("parent") == "Telephony":
+        if parent == "Telephony":
             return "12000 - Telephony"
         return None
-
     if doctype == "Company":
-        if filters == "Acme Pty Ltd" and field == "default_cost_center":
+        company = filters if isinstance(filters, str) else None
+        if company == "Acme Pty Ltd" and field == "default_cost_center":
             return "Main - CC"
         return None
-
     if doctype == "Buying Settings":
         return "General"
-
+    if doctype == "Supplier":
+        return None
     return None
 
 
-def _supplier_tax_rows(doctype, filters, fields, *args, **kwargs):
-    if doctype == "Item Tax":
-        if filters.get("parent") == "Fuel":
-            return [{"tax_type": "GST", "tax_rate": 10}]
+GST_TEMPLATE_NAME = "AU Non Capital Purchase - GST - ATX"
+
+
+def _default_get_all(doctype, filters=None, fields=None, *args, **kwargs):
+    """Shared get_all mock: returns GST template name and its rows."""
+    if doctype == "Purchase Taxes and Charges Template":
+        # _find_gst_template pattern query
+        return [{"name": GST_TEMPLATE_NAME}]
+    if doctype in ("Purchase Taxes and Charges", "Purchase Taxes and Charges Template Detail"):
+        parent = (filters or {}).get("parent") if isinstance(filters, dict) else None
+        if parent == GST_TEMPLATE_NAME:
+            return [
+                {
+                    "charge_type": "On Net Total",
+                    "account_head": "GST Payable - AC",
+                    "description": GST_TEMPLATE_NAME,
+                    "rate": 10,
+                    "cost_center": None,
+                    "included_in_print_rate": 0,
+                    "add_deduct_tax": "Add",
+                }
+            ]
     return []
 
 
-def _gst_template_rows(doctype, filters, fields, *args, **kwargs):
-    if doctype == "Purchase Taxes and Charges" and filters.get("parent") == "AU GST 10%":
-        return [
-            {
-                "charge_type": "On Net Total",
-                "account_head": "GST Payable - AC",
-                "description": "AU GST 10%",
-                "rate": 10,
-                "cost_center": "Template CC",
-                "included_in_print_rate": 0,
-                "add_deduct_tax": "Add",
-            }
-        ]
-    return []
+def _supplier_fallback_values(doctype, filters=None, field=None):
+    return _default_get_value(doctype, filters, field)
 
 
-def test_purchase_invoice_before_save_sets_default_accounts_and_taxes():
-    mock_app.db.get_value.side_effect = _supplier_fallback_values
-    mock_app.db.get_all.side_effect = lambda doctype, filters, fields, *args, **kwargs: (
-        _supplier_tax_rows(doctype, filters, fields, *args, **kwargs)
-        if doctype == "Item Tax"
-        else _gst_template_rows(doctype, filters, fields, *args, **kwargs)
-    )
+def test_purchase_invoice_before_validate_sets_default_accounts_and_taxes():
+    mock_frappe.db.get_value.side_effect = _default_get_value
+    mock_frappe.get_all.side_effect = _default_get_all
 
     doc = PurchaseInvoice(
         {
             "doctype": "Purchase Invoice",
             "company": "Acme Pty Ltd",
+            "taxes_and_charges": "AU GST 10%",  # truthy → wants GST
             "items": [
                 {"item_code": "Fuel", "expense_account": None, "rate": 100.0},
                 {"item_code": "Telephony", "expense_account": None, "rate": 100.0},
@@ -113,38 +127,40 @@ def test_purchase_invoice_before_save_sets_default_accounts_and_taxes():
         }
     )
 
-    doc.before_save()
+    doc.before_validate()
 
     assert doc.items[0]["expense_account"] == "10000 - Fuel"
     assert doc.items[1]["expense_account"] == "12000 - Telephony"
     assert doc.items[0]["cost_center"] == "Main - CC"
     assert doc.items[1]["cost_center"] == "Main - CC"
     assert len(doc.taxes) == 1
-    assert doc.taxes[0]["description"] == "AU GST 10%"
+    assert doc.taxes[0]["description"] == GST_TEMPLATE_NAME
+    assert doc.taxes_and_charges == GST_TEMPLATE_NAME
 
 
 def test_purchase_invoice_without_gst_keeps_non_gst_taxes():
-    mock_app.db.get_value.side_effect = _supplier_fallback_values
-    mock_app.db.get_all.side_effect = lambda doctype, filters, fields, *args, **kwargs: []
+    mock_frappe.db.get_value.side_effect = _default_get_value
+    mock_frappe.get_all.side_effect = _default_get_all
 
     doc = PurchaseInvoice(
         {
             "doctype": "Purchase Invoice",
             "company": "Acme Pty Ltd",
+            "taxes_and_charges": "",  # falsy → no GST
             "items": [{"item_code": "Telephony", "expense_account": None}],
             "taxes": [{"charge_type": "On Net Total", "description": "Freight", "rate": 5}],
         }
     )
 
-    doc.before_save()
+    doc.before_validate()
 
     assert len(doc.taxes) == 1
     assert doc.taxes[0]["description"] == "Freight"
 
 
 def test_purchase_invoice_internal_cost_center_is_forced():
-    mock_app.db.get_value.side_effect = _supplier_fallback_values
-    mock_app.db.get_all.side_effect = lambda doctype, filters, fields, *args, **kwargs: []
+    mock_frappe.db.get_value.side_effect = _default_get_value
+    mock_frappe.get_all.side_effect = _default_get_all
 
     doc = PurchaseInvoice(
         {
@@ -154,17 +170,23 @@ def test_purchase_invoice_internal_cost_center_is_forced():
         }
     )
 
-    doc.before_save()
+    doc.before_validate()
 
     assert doc.items[0]["cost_center"] == "Main - CC"
 
 
 def test_purchase_invoice_auto_creates_supplier():
-    mock_app.db.insert.return_value = {"name": "SUP-NEW"}
+    mock_supplier_doc = MagicMock()
+    mock_supplier_doc.name = "SUP-NEW"
+    mock_frappe.get_doc.return_value = mock_supplier_doc
 
-    def db_get_value(doctype, filters, field):
-        if doctype == "Supplier":
+    def db_get_value(doctype, filters=None, field=None):
+        if doctype == "DefaultValue":
             return None
+        if doctype == "Item":
+            return filters  # items exist
+        if doctype == "Supplier":
+            return None  # supplier does not exist → auto-create
         if doctype == "Buying Settings":
             return "General"
         if doctype == "Company" and filters == "Acme Pty Ltd":
@@ -175,8 +197,8 @@ def test_purchase_invoice_auto_creates_supplier():
             return "10000 - Fuel"
         return None
 
-    mock_app.db.get_value.side_effect = db_get_value
-    mock_app.db.get_all.side_effect = lambda doctype, filters, fields, *args, **kwargs: []
+    mock_frappe.db.get_value.side_effect = db_get_value
+    mock_frappe.get_all.side_effect = _default_get_all
 
     doc = PurchaseInvoice(
         {
@@ -187,12 +209,78 @@ def test_purchase_invoice_auto_creates_supplier():
         }
     )
 
-    doc.before_save()
+    doc.before_validate()
 
     assert doc.supplier == "SUP-NEW"
-    created_supplier = mock_app.db.insert.call_args.args[0]
-    assert created_supplier["supplier_name"] == "New Supplier"
-    assert created_supplier["supplier_group"] == "General"
+    created_dict = mock_frappe.get_doc.call_args.args[0]
+    assert created_dict["supplier_name"] == "New Supplier"
+    assert created_dict["supplier_group"] == "General"
+
+
+def test_purchase_invoice_auto_creates_item():
+    mock_item_doc = MagicMock()
+    mock_item_doc.name = "fuel"
+    mock_frappe.get_doc.return_value = mock_item_doc
+
+    def db_get_value(doctype, filters=None, field=None):
+        if doctype == "DefaultValue":
+            return None
+        if doctype == "Item":
+            return None  # item does not exist → auto-create
+        if doctype == "Company" and filters == "Acme Pty Ltd" and field == "default_cost_center":
+            return "Main - CC"
+        if doctype == "Buying Settings":
+            return "General"
+        if doctype == "Supplier":
+            return "BP"
+        return None
+
+    mock_frappe.db.get_value.side_effect = db_get_value
+    mock_frappe.get_all.side_effect = _default_get_all
+
+    doc = PurchaseInvoice(
+        {
+            "doctype": "Purchase Invoice",
+            "company": "Acme Pty Ltd",
+            "supplier": "BP",
+            "items": [{"item_code": "fuel", "item_group": "Travel", "expense_account": None}],
+        }
+    )
+
+    doc.before_validate()
+
+    created_dict = mock_frappe.get_doc.call_args.args[0]
+    assert created_dict["name"] == "fuel"
+    assert created_dict["item_group"] == "Travel"
+    assert created_dict["is_purchase_item"] == 1
+    assert doc.items[0]["item_code"] == "fuel"
+
+
+def test_purchase_invoice_company_resolved_from_session():
+    def db_get_value(doctype, filters=None, field=None):
+        if doctype == "DefaultValue":
+            return "Session Company Pty Ltd"  # user default company
+        if doctype == "Item":
+            return filters
+        if doctype == "Company" and filters == "Session Company Pty Ltd" and field == "default_cost_center":
+            return "Session CC"
+        return None
+
+    mock_frappe.db.get_value.side_effect = db_get_value
+    mock_frappe.get_all.side_effect = _default_get_all
+
+    doc = PurchaseInvoice(
+        {
+            "doctype": "Purchase Invoice",
+            "company": "Wrong Company",  # should be overridden
+            "items": [{"item_code": "Fuel", "expense_account": None}],
+        }
+    )
+
+    doc.before_validate()
+
+    assert doc.company == "Session Company Pty Ltd"
+    assert doc.items[0]["cost_center"] == "Session CC"
 
 
 def test_dashboard_summary_returns_aggregates():
