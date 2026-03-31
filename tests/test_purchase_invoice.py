@@ -15,6 +15,17 @@ class MockDocumentController:
         for key, value in data.items():
             setattr(self, key, value)
 
+    def set(self, key, value):
+        setattr(self, key, value)
+
+    def append(self, key, value):
+        if not hasattr(self, key):
+            setattr(self, key, [])
+        getattr(self, key).append(value)
+
+    def get(self, key, default=None):
+        return getattr(self, key, default)
+
 
 mock_frappe = MagicMock()
 mock_frappe.whitelist = lambda *args, **kwargs: (lambda fn: fn)
