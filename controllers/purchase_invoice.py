@@ -14,6 +14,19 @@ def _app_db():
     return get_app().db
 
 
+def _resolve_company_from_user(db):
+    """Resolve the user's default company from Frappe session defaults."""
+    import frappe
+    user = getattr(getattr(frappe, 'session', None), 'user', None)
+    if not user or user == 'Guest':
+        return None
+    return db.get_value(
+        "DefaultValue",
+        {"parent": user, "defkey": "company"},
+        "defvalue",
+    ) or None
+
+
 def _value(row: Any, field: str, default=None):
     if isinstance(row, dict):
         return row.get(field, default)
@@ -80,10 +93,26 @@ def _get_default_cost_center(db, company: str):
     return None
 
 
-def _gst_template_rows(db, company: str) -> List[Dict[str, Any]]:
+def _find_gst_template(db):
+    """Return the actual GST purchase tax template name for this ERPNext instance."""
+    for pattern in ("%Non Capital%GST%", "%Capital%GST%", "%GST%"):
+        rows = db.get_all(
+            "Purchase Taxes and Charges Template",
+            filters={"name": ("like", pattern)},
+            fields=["name"],
+            limit=1,
+        )
+        if rows:
+            name = _value(rows[0], "name", None)
+            if name and "import" not in str(name).lower():
+                return name
+    return None
+
+
+def _gst_template_rows(db, company: str, template_name: str = DEFAULT_GST_TEMPLATE) -> List[Dict[str, Any]]:
     template_rows = db.get_all(
         "Purchase Taxes and Charges",
-        filters={"parent": DEFAULT_GST_TEMPLATE},
+        filters={"parent": template_name},
         fields=[
             "charge_type",
             "account_head",
@@ -98,7 +127,7 @@ def _gst_template_rows(db, company: str) -> List[Dict[str, Any]]:
     if not template_rows:
         template_rows = db.get_all(
             "Purchase Taxes and Charges Template Detail",
-            filters={"parent": DEFAULT_GST_TEMPLATE},
+            filters={"parent": template_name},
             fields=[
                 "charge_type",
                 "account_head",
@@ -207,45 +236,85 @@ def _create_supplier(db, supplier_name: str, supplier_group: str | None):
     raise RuntimeError("Tenant DB adapter does not support document insert/create")
 
 
+def _resolve_item_code(db, item_name: str, item_group: str) -> str:
+    """Return existing item code or auto-create an Item under item_group."""
+    item_name = str(item_name).strip() if item_name else None
+    if not item_name:
+        return item_name
+
+    existing = db.get_value("Item", item_name, "name")
+    if existing:
+        return existing
+
+    payload = {
+        "name": item_name,
+        "item_name": item_name,
+        "item_group": item_group or "All Item Groups",
+        "is_purchase_item": 1,
+        "is_sales_item": 0,
+        "stock_uom": "Nos",
+    }
+    insert = getattr(db, "insert", None) or getattr(db, "create", None)
+    if callable(insert):
+        created = insert(payload)
+        return _value(created, "name", item_name)
+    raise RuntimeError("Tenant DB adapter does not support document insert/create")
+
+
 class PurchaseInvoice(DocumentController):
     """
     Auto-populate accounting values for Purchase Invoice records created by the mobile app.
     """
 
-    def before_save(self):
+    def before_validate(self):
         db = _app_db()
-        company = _value(self, "company", None)
+        # Resolve company from session user defaults; fall back to payload value.
+        # This runs before ERPNext's own validate() so link fields are fixed in time.
+        company = _resolve_company_from_user(db) or _value(self, "company", None)
         if not company:
             return
+        _set_value(self, "company", company)
 
+        # Auto-create supplier so ERPNext's link validation passes.
         supplier = _resolve_supplier_name(db, _value(self, "supplier", None))
         if supplier:
             _set_value(self, "supplier", supplier)
 
-        items = _value(self, "items", []) or []
-        has_gst_item = False
         cost_center = _get_default_cost_center(db, company)
+        items = _value(self, "items", []) or []
 
         for item in items:
             item_code = _value(item, "item_code")
+            item_group = _value(item, "item_group", None) or "All Item Groups"
             if not item_code:
                 continue
 
-            expense_account = _get_default_expense_account(db, item_code, company)
+            # Auto-create Item so ERPNext's link validation passes.
+            resolved_code = _resolve_item_code(db, item_code, item_group)
+            _set_value(item, "item_code", resolved_code)
+
+            expense_account = _get_default_expense_account(db, resolved_code, company)
             if expense_account:
                 _set_value(item, "expense_account", expense_account)
             if cost_center:
                 _set_value(item, "cost_center", cost_center)
 
-            if not has_gst_item and _item_has_gst(db, item_code):
-                has_gst_item = True
-
+        # Resolve the real GST template that exists in this ERPNext instance.
+        # Mobile sends taxes_and_charges as non-empty string to signal GST intent.
+        wants_gst = bool(_value(self, "taxes_and_charges", None))
         existing_taxes = [
             _serialise(tax) for tax in _value(self, "taxes", []) or []
         ]
         manual_taxes = [tax for tax in existing_taxes if not _is_gst_row(tax)]
 
-        if has_gst_item:
-            self.taxes = manual_taxes + _gst_template_rows(db, company)
+        if wants_gst:
+            gst_template = _find_gst_template(db)
+            if gst_template:
+                _set_value(self, "taxes_and_charges", gst_template)
+                self.taxes = manual_taxes + _gst_template_rows(db, company, gst_template)
+            else:
+                _set_value(self, "taxes_and_charges", "")
+                self.taxes = manual_taxes
         else:
+            _set_value(self, "taxes_and_charges", "")
             self.taxes = manual_taxes
