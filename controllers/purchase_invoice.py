@@ -16,6 +16,7 @@ GST_MARKER = "gst"
 
 
 def _create_system_doc(doctype: str, values: Dict[str, Any], **insert_kwargs):
+    print(f"DEBUG: _create_system_doc calling insert_doc for {doctype} with values keys {list(values.keys())} and insert_kwargs {insert_kwargs}")
     doc = _app_db().insert_doc(doctype, values, ignore_permissions=True, **insert_kwargs)
     frappe.db.commit()
     return doc
@@ -513,10 +514,16 @@ class PurchaseInvoice(DocumentController):
             gst_template = _find_gst_template()
             if gst_template:
                 _set_value(self, "taxes_and_charges", gst_template)
-                self.taxes = manual_taxes + _gst_template_rows(company, gst_template)
+                self.set("taxes", [])
+                for row in manual_taxes + _gst_template_rows(company, gst_template):
+                    self.append("taxes", row)
             else:
                 _set_value(self, "taxes_and_charges", "")
-                self.taxes = manual_taxes
+                self.set("taxes", [])
+                for row in manual_taxes:
+                    self.append("taxes", row)
         else:
             _set_value(self, "taxes_and_charges", "")
-            self.taxes = manual_taxes
+            self.set("taxes", [])
+            for row in manual_taxes:
+                self.append("taxes", row)
