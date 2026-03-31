@@ -3,7 +3,12 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 import frappe
+from frappe_microservice import get_app
 from frappe_microservice.controller import DocumentController
+
+
+def _app_db():
+    return get_app().db
 
 
 DEFAULT_GST_TEMPLATE = "AU GST 10%"
@@ -219,13 +224,11 @@ def _create_supplier(supplier_name: str, supplier_group: str | None):
             break
         name = _normalize_name(f"{base_name}-{i}", fallback="Supplier", max_length=95)
 
-    doc = frappe.get_doc({
-        "doctype": "Supplier",
+    doc = _app_db().insert_doc("Supplier", {
         "name": name,
         "supplier_name": supplier_name,
         "supplier_group": supplier_group,
-    })
-    doc.insert(ignore_permissions=True)
+    }, ignore_permissions=True)
     return doc.name
 
 
@@ -239,16 +242,14 @@ def _resolve_item_code(item_name: str, item_group: str) -> str:
     if existing:
         return existing
 
-    doc = frappe.get_doc({
-        "doctype": "Item",
+    doc = _app_db().insert_doc("Item", {
         "name": item_name,
         "item_name": item_name,
         "item_group": item_group or "All Item Groups",
         "is_purchase_item": 1,
         "is_sales_item": 0,
         "stock_uom": "Nos",
-    })
-    doc.insert(ignore_permissions=True)
+    }, ignore_permissions=True)
     return doc.name
 
 
