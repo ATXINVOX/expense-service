@@ -388,15 +388,22 @@ def _create_supplier(supplier_name: str, supplier_group: str | None):
             break
         name = _normalize_name(f"{base_name}-{i}", fallback="Supplier", max_length=95)
 
-    doc = _app_db().insert_doc("Supplier", {
-        "name": name,
-        "supplier_name": supplier_name,
-        "supplier_group": supplier_group,
-    }, ignore_permissions=True)
-    # Commit immediately so ERPNext link validation (run during Purchase Invoice
-    # doc.insert()) can find this record on the same DB connection.
-    frappe.db.commit()
-    return doc.name
+    try:
+        doc = _app_db().insert_doc("Supplier", {
+            "name": name,
+            "supplier_name": supplier_name,
+            "supplier_group": supplier_group,
+        }, ignore_permissions=True)
+        # Commit immediately so ERPNext link validation (run during Purchase Invoice
+        # doc.insert()) can find this record on the same DB connection.
+        frappe.db.commit()
+        return doc.name
+    except frappe.DuplicateEntryError:
+        # Row exists for another tenant — tenant-aware get_value missed it.
+        # Safe to reuse: the name is globally unique and ERPNext link validation
+        # only checks the primary key.
+        frappe.db.rollback()
+        return name
 
 
 def _resolve_item_code(item_name: str, item_group: str) -> str:
@@ -409,20 +416,24 @@ def _resolve_item_code(item_name: str, item_group: str) -> str:
     if existing:
         return existing
 
-    doc = _app_db().insert_doc("Item", {
-        "name": item_name,
-        "item_code": item_name,
-        "item_name": item_name,
-        "item_group": item_group or "All Item Groups",
-        "is_purchase_item": 1,
-        "is_sales_item": 0,
-        "is_stock_item": 0,
-        "is_fixed_asset": 0,
-        "stock_uom": "Nos",
-    }, ignore_permissions=True)
-    # Commit immediately so ERPNext link validation can find this record.
-    frappe.db.commit()
-    return doc.name
+    try:
+        doc = _app_db().insert_doc("Item", {
+            "name": item_name,
+            "item_code": item_name,
+            "item_name": item_name,
+            "item_group": item_group or "All Item Groups",
+            "is_purchase_item": 1,
+            "is_sales_item": 0,
+            "is_stock_item": 0,
+            "is_fixed_asset": 0,
+            "stock_uom": "Nos",
+        }, ignore_permissions=True)
+        # Commit immediately so ERPNext link validation can find this record.
+        frappe.db.commit()
+        return doc.name
+    except frappe.DuplicateEntryError:
+        frappe.db.rollback()
+        return item_name
 
 
 def _resolve_item_identity(item: Any) -> tuple[str | None, str | None]:
