@@ -90,7 +90,10 @@ def _get_default_expense_account(item_code: str, company: str):
 
 def _get_default_cost_center(company: str):
     for field in ("default_cost_center", "cost_center", "default_cost_center_name"):
-        value = frappe.db.get_value("Company", company, field)
+        try:
+            value = frappe.db.get_value("Company", company, field)
+        except Exception:
+            value = None
         if value:
             return value
     return None
