@@ -78,7 +78,7 @@ def _default_get_value(doctype, filters, field=None):
         return None
     if doctype == "Company":
         company = filters if isinstance(filters, str) else None
-        if company == "Acme Pty Ltd" and field == "default_cost_center":
+        if company == "Acme Pty Ltd" and field == "cost_center":
             return "Main - CC"
         return None
     if doctype == "Buying Settings":
@@ -196,7 +196,7 @@ def test_purchase_invoice_auto_creates_supplier():
         if doctype == "Buying Settings":
             return "General"
         if doctype == "Company" and filters == "Acme Pty Ltd":
-            if field == "default_cost_center":
+            if field == "cost_center":
                 return "Main - CC"
             return None
         if doctype == "Item Default":
@@ -234,7 +234,7 @@ def test_purchase_invoice_auto_creates_item():
             return None
         if doctype == "Item":
             return None  # item does not exist → auto-create
-        if doctype == "Company" and filters == "Acme Pty Ltd" and field == "default_cost_center":
+        if doctype == "Company" and filters == "Acme Pty Ltd" and field == "cost_center":
             return "Main - CC"
         if doctype == "Buying Settings":
             return "General"
@@ -272,7 +272,7 @@ def test_purchase_invoice_company_resolved_from_session():
             return "Session Company Pty Ltd"  # user default company
         if doctype == "Item":
             return filters
-        if doctype == "Company" and filters == "Session Company Pty Ltd" and field == "default_cost_center":
+        if doctype == "Company" and filters == "Session Company Pty Ltd" and field == "cost_center":
             return "Session CC"
         return None
 
@@ -375,7 +375,7 @@ def test_purchase_invoice_bootstraps_missing_cost_center():
     # Setup: Company has no default cost center
     def db_get_value(doctype, filters, field=None):
         if doctype == "Company" and filters == "Acme Pty Ltd":
-            if field == "default_cost_center": return None
+            if field == "cost_center": return None
             if field == "abbr": return "ACME"
         return None
 
@@ -401,6 +401,6 @@ def test_purchase_invoice_bootstraps_missing_cost_center():
     assert mock_app.db.insert_doc.call_count >= 2
     
     # Verify: Company should be updated with Main CC
-    mock_app.db.set_value.assert_any_call("Company", "Acme Pty Ltd", "default_cost_center", "Main - ACME")
+    mock_app.db.set_value.assert_any_call("Company", "Acme Pty Ltd", "cost_center", "Main - ACME")
 
 
