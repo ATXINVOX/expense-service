@@ -178,7 +178,7 @@ def test_purchase_invoice_internal_cost_center_is_forced():
 def test_purchase_invoice_auto_creates_supplier():
     mock_supplier_doc = MagicMock()
     mock_supplier_doc.name = "SUP-NEW"
-    mock_frappe.get_doc.return_value = mock_supplier_doc
+    mock_app.db.insert_doc.return_value = mock_supplier_doc
 
     def db_get_value(doctype, filters=None, field=None):
         if doctype == "DefaultValue":
@@ -212,15 +212,16 @@ def test_purchase_invoice_auto_creates_supplier():
     doc.before_validate()
 
     assert doc.supplier == "SUP-NEW"
-    created_dict = mock_frappe.get_doc.call_args.args[0]
-    assert created_dict["supplier_name"] == "New Supplier"
-    assert created_dict["supplier_group"] == "General"
+    call_args = mock_app.db.insert_doc.call_args
+    created_data = call_args.args[1] if len(call_args.args) > 1 else call_args.kwargs.get('data', {})
+    assert created_data["supplier_name"] == "New Supplier"
+    assert created_data["supplier_group"] == "General"
 
 
 def test_purchase_invoice_auto_creates_item():
     mock_item_doc = MagicMock()
     mock_item_doc.name = "fuel"
-    mock_frappe.get_doc.return_value = mock_item_doc
+    mock_app.db.insert_doc.return_value = mock_item_doc
 
     def db_get_value(doctype, filters=None, field=None):
         if doctype == "DefaultValue":
@@ -249,10 +250,11 @@ def test_purchase_invoice_auto_creates_item():
 
     doc.before_validate()
 
-    created_dict = mock_frappe.get_doc.call_args.args[0]
-    assert created_dict["name"] == "fuel"
-    assert created_dict["item_group"] == "Travel"
-    assert created_dict["is_purchase_item"] == 1
+    call_args = mock_app.db.insert_doc.call_args
+    created_data = call_args.args[1] if len(call_args.args) > 1 else call_args.kwargs.get('data', {})
+    assert created_data["name"] == "fuel"
+    assert created_data["item_group"] == "Travel"
+    assert created_data["is_purchase_item"] == 1
     assert doc.items[0]["item_code"] == "fuel"
 
 
