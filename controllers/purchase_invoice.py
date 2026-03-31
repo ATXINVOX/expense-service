@@ -8,7 +8,7 @@ from frappe_microservice.controller import DocumentController
 
 
 def _app_db():
-    return get_app().db
+    return get_app().tenant_db
 
 
 DEFAULT_GST_TEMPLATE = "AU GST 10%"
