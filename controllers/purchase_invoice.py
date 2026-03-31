@@ -15,8 +15,8 @@ DEFAULT_GST_TEMPLATE = "AU GST 10%"
 GST_MARKER = "gst"
 
 
-def _create_system_doc(doctype: str, values: Dict[str, Any]):
-    doc = _app_db().insert_doc(doctype, values, ignore_permissions=True)
+def _create_system_doc(doctype: str, values: Dict[str, Any], **insert_kwargs):
+    doc = _app_db().insert_doc(doctype, values, ignore_permissions=True, **insert_kwargs)
     frappe.db.commit()
     return doc
 
@@ -187,28 +187,29 @@ def _get_default_cost_center(company: str):
     abbr = _company_abbr(company)
     root_name = f"{company} - {abbr}"
     if not _app_db().get_value("Cost Center", root_name, "name"):
-        _create_system_doc(
+        root_doc = _create_system_doc(
             "Cost Center",
             {
-                "name": root_name,
                 "cost_center_name": company,
                 "company": company,
                 "is_group": 1,
             },
+            ignore_mandatory=True,
         )
+        root_name = root_doc.name
 
     cost_center_name = f"Main - {abbr}"
     if not _app_db().get_value("Cost Center", cost_center_name, "name"):
-        _create_system_doc(
+        leaf_doc = _create_system_doc(
             "Cost Center",
             {
-                "name": cost_center_name,
                 "cost_center_name": "Main",
                 "company": company,
                 "parent_cost_center": root_name,
                 "is_group": 0,
             },
         )
+        cost_center_name = leaf_doc.name
 
     return cost_center_name
     return None
