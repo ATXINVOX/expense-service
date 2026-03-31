@@ -3,3 +3,8 @@ __pycache__/
 *.pyc
 .env
 .DS_Store
+
+Containerfile.dev
+venv/
+.venv/
+requirements-dev.txt
