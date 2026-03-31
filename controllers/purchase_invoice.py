@@ -258,6 +258,7 @@ def _resolve_item_code(item_name: str, item_group: str) -> str:
         "item_group": item_group or "All Item Groups",
         "is_purchase_item": 1,
         "is_sales_item": 0,
+        "is_stock_item": 0,
         "stock_uom": "Nos",
     }, ignore_permissions=True)
     # Commit immediately so ERPNext link validation can find this record.
