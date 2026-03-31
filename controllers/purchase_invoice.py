@@ -494,7 +494,7 @@ class PurchaseInvoice(DocumentController):
             _set_value(self, "supplier", supplier)
 
         cost_center = _get_default_cost_center(company)
-        raw_items = _serialise(self).get("items", []) or []
+        raw_items = list(_value(self, "items", []) or [])
         self.set("items", [])
         
         for item_data in raw_items:
