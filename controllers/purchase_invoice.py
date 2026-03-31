@@ -247,6 +247,7 @@ def _resolve_item_code(item_name: str, item_group: str) -> str:
 
     doc = _app_db().insert_doc("Item", {
         "name": item_name,
+        "item_code": item_name,
         "item_name": item_name,
         "item_group": item_group or "All Item Groups",
         "is_purchase_item": 1,
