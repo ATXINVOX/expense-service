@@ -236,15 +236,20 @@ def test_purchase_invoice_auto_creates_supplier():
 
 
 def test_purchase_invoice_auto_creates_item():
-    mock_item_doc = MagicMock()
-    mock_item_doc.name = "fuel"
-    mock_app.db.insert_doc.return_value = mock_item_doc
+    def insert_doc_side_effect(doctype, data, **kwargs):
+        doc = MagicMock()
+        doc.name = data.get("name", doctype)
+        return doc
+
+    mock_app.db.insert_doc.side_effect = insert_doc_side_effect
 
     def db_get_value(doctype, filters=None, field=None):
         if doctype == "DefaultValue":
             return None
         if doctype == "Item":
             return None  # item does not exist → auto-create
+        if doctype == "Item Group":
+            return None  # item group does not exist → auto-create
         if doctype == "Company" and filters == "Acme Pty Ltd" and field == "cost_center":
             return "Main - CC"
         if doctype == "Buying Settings":
@@ -394,7 +399,8 @@ def test_purchase_invoice_bootstraps_missing_cost_center():
     mock_frappe.get_all.return_value = [] # No existing cost centers
     mock_app.db.exists.return_value = False
     
-    # Mock insert_doc to return a doc with a name
+    # Clear side_effect from previous tests, then set return_value
+    mock_app.db.insert_doc.side_effect = None
     mock_cc_doc = MagicMock()
     mock_cc_doc.name = "Main - ACME"
     mock_app.db.insert_doc.return_value = mock_cc_doc
