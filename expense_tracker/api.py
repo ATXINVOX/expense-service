@@ -51,6 +51,14 @@ def _app_db():
 
 
 def _resolve_company():
+    """Resolve the current user's company.
+
+    Checks in order:
+    1. frappe.defaults (if available in context)
+    2. DefaultValue table (user-level, defkey=company)
+    3. User Permission (allow=Company) — set during signup provisioning
+    4. System-level default (__default)
+    """
     defaults = getattr(frappe, "defaults", None)
     if defaults:
         get_user_default = getattr(defaults, "get_user_default", None)
@@ -60,20 +68,31 @@ def _resolve_company():
                 if user_company:
                     return user_company
 
-    session = getattr(frappe, "session", None)
-    if session:
-        user = getattr(session, "user", None)
-        if user:
-            db = _app_db()
-            company = db.get_value(
-                "DefaultValue",
-                {"parent": user, "defkey": "company"},
-                "defvalue",
-            )
-            if company:
-                return company
+    user = getattr(getattr(frappe, "session", None), "user", None)
+    if not user or user == "Guest":
+        return None
 
-    return None
+    user_company = frappe.db.get_value(
+        "DefaultValue",
+        {"parent": user, "defkey": "company"},
+        "defvalue",
+    )
+    if user_company:
+        return user_company
+
+    permitted = frappe.db.get_value(
+        "User Permission",
+        {"user": user, "allow": "Company"},
+        "for_value",
+    )
+    if permitted:
+        return permitted
+
+    return frappe.db.get_value(
+        "DefaultValue",
+        {"parent": "__default", "defkey": "company"},
+        "defvalue",
+    ) or None
 
 
 @get_app().secure_route('/api/method/expense_tracker.api.get_dashboard_summary', methods=['GET'])

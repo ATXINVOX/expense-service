@@ -22,6 +22,51 @@ def _create_system_doc(doctype: str, values: Dict[str, Any], **insert_kwargs):
     return doc
 
 
+def _ensure_fiscal_year(posting_date: str | None, company: str):
+    """Create a Fiscal Year covering the posting_date if none exists."""
+    from datetime import date as _date, datetime as _datetime
+
+    if not posting_date:
+        dt = _date.today()
+    elif isinstance(posting_date, str):
+        try:
+            dt = _datetime.fromisoformat(posting_date).date()
+        except ValueError:
+            dt = _date.today()
+    elif isinstance(posting_date, _datetime):
+        dt = posting_date.date()
+    elif isinstance(posting_date, _date):
+        dt = posting_date
+    else:
+        dt = _date.today()
+
+    fy_start = dt.replace(month=7, day=1) if dt.month >= 7 else dt.replace(year=dt.year - 1, month=7, day=1)
+    fy_end = fy_start.replace(year=fy_start.year + 1, month=6, day=30)
+    fy_name = f"{fy_start.year}-{fy_end.year}"
+
+    existing = frappe.db.get_value("Fiscal Year", fy_name, "name")
+    if existing:
+        return existing
+
+    try:
+        fy_doc = _create_system_doc("Fiscal Year", {
+            "name": fy_name,
+            "year": fy_name,
+            "year_start_date": str(fy_start),
+            "year_end_date": str(fy_end),
+        }, ignore_mandatory=True)
+        frappe.db.sql("""
+            INSERT IGNORE INTO `tabFiscal Year Company`
+            (name, parent, parenttype, parentfield, company, creation, modified, modified_by, owner, docstatus, idx)
+            VALUES (%s, %s, 'Fiscal Year', 'companies', %s, NOW(), NOW(), 'Administrator', 'Administrator', 0, 1)
+        """, (f"{fy_name}-{company}", fy_name, company))
+        frappe.db.commit()
+        return fy_doc.name
+    except frappe.DuplicateEntryError:
+        frappe.db.rollback()
+        return fy_name
+
+
 def _company_abbr(company: str) -> str:
     abbr = _app_db().get_value("Company", company, "abbr")
     if abbr:
@@ -524,9 +569,10 @@ class PurchaseInvoice(DocumentController):
             return
         _set_value(self, "company", company)
 
-        # Bootstrap company defaults if missing
+        # Bootstrap company defaults and fiscal year if missing
         _get_default_cost_center(company)
         _ensure_default_payable_account(company)
+        _ensure_fiscal_year(_value(self, "posting_date", None), company)
 
         # Auto-create supplier so ERPNext's link validation passes.
         # Fall back to "General Supplier" when the frontend doesn't send one.
@@ -587,3 +633,17 @@ class PurchaseInvoice(DocumentController):
             self.set("taxes", [])
             for row in manual_taxes:
                 self.append("taxes", row)
+
+    def after_insert(self):
+        """Auto-submit the Purchase Invoice so it's not left as Draft."""
+        try:
+            if hasattr(self, 'doc') and self.doc:
+                doc = self.doc
+            else:
+                doc = self
+            if getattr(doc, 'docstatus', 0) == 0:
+                doc.docstatus = 1
+                doc.save(ignore_permissions=True)
+                frappe.db.commit()
+        except Exception as e:
+            print(f"WARNING: Auto-submit failed for Purchase Invoice: {e}")
