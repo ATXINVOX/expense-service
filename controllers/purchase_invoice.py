@@ -529,7 +529,11 @@ class PurchaseInvoice(DocumentController):
         _ensure_default_payable_account(company)
 
         # Auto-create supplier so ERPNext's link validation passes.
-        supplier = _resolve_supplier_name(_value(self, "supplier", None))
+        # Fall back to "General Supplier" when the frontend doesn't send one.
+        supplier_value = _value(self, "supplier", None)
+        if not supplier_value or not str(supplier_value).strip():
+            supplier_value = "General Supplier"
+        supplier = _resolve_supplier_name(supplier_value)
         if supplier:
             _set_value(self, "supplier", supplier)
 
