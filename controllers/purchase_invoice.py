@@ -425,6 +425,30 @@ def _create_supplier(supplier_name: str, supplier_group: str | None):
         return name
 
 
+def _ensure_item_group(group_name: str) -> str:
+    """Ensure the Item Group exists; auto-create under 'All Item Groups' if missing."""
+    group_name = str(group_name).strip() if group_name else "All Item Groups"
+    if not group_name or group_name == "All Item Groups":
+        return "All Item Groups"
+
+    existing = _app_db().get_value("Item Group", group_name, "name")
+    if existing:
+        return existing
+
+    try:
+        doc = _app_db().insert_doc("Item Group", {
+            "name": group_name,
+            "item_group_name": group_name,
+            "parent_item_group": "All Item Groups",
+            "is_group": 0,
+        }, ignore_permissions=True)
+        frappe.db.commit()
+        return doc.name
+    except frappe.DuplicateEntryError:
+        frappe.db.rollback()
+        return group_name
+
+
 def _resolve_item_code(item_name: str, item_group: str) -> str:
     """Return existing item code or auto-create an Item under item_group."""
     item_name = str(item_name).strip() if item_name else None
@@ -435,19 +459,20 @@ def _resolve_item_code(item_name: str, item_group: str) -> str:
     if existing:
         return existing
 
+    resolved_group = _ensure_item_group(item_group)
+
     try:
         doc = _app_db().insert_doc("Item", {
             "name": item_name,
             "item_code": item_name,
             "item_name": item_name,
-            "item_group": item_group or "All Item Groups",
+            "item_group": resolved_group,
             "is_purchase_item": 1,
             "is_sales_item": 0,
             "is_stock_item": 0,
             "is_fixed_asset": 0,
             "stock_uom": "Nos",
         }, ignore_permissions=True)
-        # Commit immediately so ERPNext link validation can find this record.
         frappe.db.commit()
         return doc.name
     except frappe.DuplicateEntryError:
