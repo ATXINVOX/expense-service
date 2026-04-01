@@ -95,6 +95,75 @@ def _resolve_company():
     ) or None
 
 
+@get_app().secure_route('/api/method/expense_tracker.api.get_expenses', methods=['GET'])
+def get_expenses(user, from_date=None, to_date=None, limit=None, offset=None):
+    db = _app_db()
+    company = _resolve_company()
+    if not company:
+        frappe.throw("Company is required")
+
+    from_date = _safe_date(from_date, _default_from_date)
+    to_date = _safe_date(to_date, date.today)
+
+    if not from_date or not to_date:
+        from_date = _default_from_date()
+        to_date = date.today()
+
+    if from_date > to_date:
+        from_date, to_date = to_date, from_date
+
+    try:
+        limit = int(limit) if limit else 20
+    except (ValueError, TypeError):
+        limit = 20
+    try:
+        offset = int(offset) if offset else 0
+    except (ValueError, TypeError):
+        offset = 0
+
+    filters = _invoice_filters(company, from_date, to_date)
+    invoices = db.get_all(
+        "Purchase Invoice",
+        filters=filters,
+        fields=[
+            "name", "company", "supplier", "posting_date",
+            "grand_total", "total_taxes_and_charges",
+            "remarks", "docstatus", "status",
+        ],
+        limit_start=offset,
+        limit_page_length=limit,
+        order_by="posting_date desc",
+    )
+
+    if invoices:
+        invoice_names = [row.get("name") for row in invoices]
+        items = db.get_all(
+            "Purchase Invoice Item",
+            filters=[["parent", "in", invoice_names]],
+            fields=[
+                "parent", "item_code", "item_name", "item_group",
+                "qty", "rate", "amount", "expense_account",
+            ],
+            order_by="idx asc",
+        )
+
+        items_by_parent = {}
+        for item in items or []:
+            parent = item.get("parent")
+            items_by_parent.setdefault(parent, []).append(item)
+
+        for inv in invoices:
+            inv["items"] = items_by_parent.get(inv.get("name"), [])
+    else:
+        invoices = []
+
+    return {
+        "company": company,
+        "count": len(invoices),
+        "data": invoices,
+    }
+
+
 @get_app().secure_route('/api/method/expense_tracker.api.get_dashboard_summary', methods=['GET'])
 def get_dashboard_summary(user, from_date=None, to_date=None):
     db = _app_db()
