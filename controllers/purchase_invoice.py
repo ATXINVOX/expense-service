@@ -279,12 +279,21 @@ def _ensure_default_payable_account(company: str):
     # Note: We don't set it on company here, as the NEXT save/validate will find it
 
 
-def _find_gst_template():
-    """Return the actual GST purchase tax template name for this ERPNext instance."""
+def _find_gst_template(company: str | None = None):
+    """Return the GST purchase tax template for the given company.
+
+    Searches with a company filter first so we never pick up another
+    tenant's template (e.g. ATX accounts on a 'Test Pty Ltd' invoice).
+    Falls back to an unfiltered search only if no company is supplied.
+    """
     for pattern in ("%Non Capital%GST%", "%Capital%GST%", "%GST%"):
+        filters = {"name": ("like", pattern)}
+        if company:
+            filters["company"] = company
+
         rows = frappe.get_all(
             "Purchase Taxes and Charges Template",
-            filters={"name": ("like", pattern)},
+            filters=filters,
             fields=["name"],
             limit=1,
         )
@@ -328,13 +337,19 @@ def _gst_template_rows(company: str, template_name: str = DEFAULT_GST_TEMPLATE) 
     if not template_rows:
         return []
 
+    abbr = _company_abbr(company)
     cost_center = _get_default_cost_center(company)
     rows = []
     for row in template_rows or []:
+        account_head = _value(row, "account_head", "")
+        if account_head and " - " in account_head:
+            account_base = account_head.rsplit(" - ", 1)[0]
+            account_head = f"{account_base} - {abbr}"
+
         rows.append(
             {
                 "charge_type": _value(row, "charge_type", "On Net Total"),
-                "account_head": _value(row, "account_head"),
+                "account_head": account_head,
                 "description": _value(row, "description", DEFAULT_GST_TEMPLATE),
                 "rate": _value(row, "rate"),
                 "cost_center": _value(row, "cost_center", cost_center),
@@ -552,7 +567,7 @@ class PurchaseInvoice(DocumentController):
         manual_taxes = [tax for tax in existing_taxes if not _is_gst_row(tax)]
 
         if wants_gst:
-            gst_template = _find_gst_template()
+            gst_template = _find_gst_template(company)
             if gst_template:
                 _set_value(self, "taxes_and_charges", gst_template)
                 self.set("taxes", [])
