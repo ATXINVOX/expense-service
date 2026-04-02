@@ -711,22 +711,44 @@ class PurchaseInvoice(DocumentController):
     def after_insert(self):
         """Auto-submit the Purchase Invoice so it's not left as Draft.
 
-        Sets status to 'Submitted' (not ERPNext's default 'Unpaid') since the
-        expense tracker only uses two statuses: Draft and Submitted.
+        Uses direct DB writes instead of doc.save()/doc.submit() to avoid
+        ERPNext's submission workflow which can fail on accounting validations
+        or override the status to 'Unpaid' based on outstanding amounts.
+        The expense tracker only uses two statuses: Draft and Submitted.
         """
+        doc = self.doc if hasattr(self, 'doc') and self.doc else self
+        inv_name = getattr(doc, 'name', None)
+
+        if not inv_name or getattr(doc, 'docstatus', 0) != 0:
+            return
+
         try:
-            if hasattr(self, 'doc') and self.doc:
-                doc = self.doc
-            else:
-                doc = self
-            if getattr(doc, 'docstatus', 0) == 0:
-                doc.docstatus = 1
-                doc.save(ignore_permissions=True)
-                # Override ERPNext's computed status (e.g. "Unpaid") with simple "Submitted"
-                inv_name = getattr(doc, 'name', None)
-                if inv_name:
-                    frappe.db.set_value("Purchase Invoice", inv_name, "status", "Submitted", update_modified=False)
+            frappe.db.set_value(
+                "Purchase Invoice",
+                inv_name,
+                {"docstatus": 1, "status": "Submitted"},
+            )
+            frappe.db.commit()
+
+            saved_status = frappe.db.get_value(
+                "Purchase Invoice", inv_name, "status",
+            )
+            if saved_status != "Submitted":
+                logger.warning(
+                    "after_insert: status verification failed for %s — "
+                    "expected 'Submitted', got '%s'",
+                    inv_name, saved_status,
+                )
+                frappe.db.set_value(
+                    "Purchase Invoice", inv_name, "status", "Submitted",
+                )
                 frappe.db.commit()
-                logger.info("after_insert: auto-submitted Purchase Invoice %s", inv_name)
-        except Exception as e:
-            logger.error("after_insert: auto-submit failed: %s", e)
+
+            doc.docstatus = 1
+            doc.status = "Submitted"
+            logger.info("after_insert: auto-submitted Purchase Invoice %s", inv_name)
+        except Exception:
+            logger.exception(
+                "after_insert: auto-submit failed for Purchase Invoice %s",
+                inv_name,
+            )
