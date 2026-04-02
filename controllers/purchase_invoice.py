@@ -43,17 +43,20 @@ def _ensure_expense_custom_columns():
 
     for col_name, col_type in EXPENSE_CUSTOM_COLUMNS:
         try:
+            fieldtype = "Link" if col_name == "expense_item_group" else ("Int" if "count" in col_name else "Data")
+            options = "Item Group" if col_name == "expense_item_group" else ""
             frappe.db.sql("""
                 INSERT IGNORE INTO `tabCustom Field`
-                (name, dt, fieldname, fieldtype, label, module, read_only,
+                (name, dt, fieldname, fieldtype, label, module, read_only, options,
                  creation, modified, modified_by, owner, docstatus, idx)
-                VALUES (%s, 'Purchase Invoice', %s, %s, %s, 'Saas Platform', 1,
+                VALUES (%s, 'Purchase Invoice', %s, %s, %s, 'Saas Platform', 1, %s,
                         NOW(), NOW(), 'Administrator', 'Administrator', 0, 0)
             """, (
                 f"Purchase Invoice-{col_name}",
                 col_name,
-                "Link" if col_name == "expense_item_group" else ("Int" if "count" in col_name else "Data"),
+                fieldtype,
                 col_name.replace("expense_", "").replace("_", " ").title(),
+                options,
             ))
         except Exception:
             pass
@@ -706,7 +709,11 @@ class PurchaseInvoice(DocumentController):
                 self.append("taxes", row)
 
     def after_insert(self):
-        """Auto-submit the Purchase Invoice so it's not left as Draft."""
+        """Auto-submit the Purchase Invoice so it's not left as Draft.
+
+        Sets status to 'Submitted' (not ERPNext's default 'Unpaid') since the
+        expense tracker only uses two statuses: Draft and Submitted.
+        """
         try:
             if hasattr(self, 'doc') and self.doc:
                 doc = self.doc
@@ -715,7 +722,11 @@ class PurchaseInvoice(DocumentController):
             if getattr(doc, 'docstatus', 0) == 0:
                 doc.docstatus = 1
                 doc.save(ignore_permissions=True)
+                # Override ERPNext's computed status (e.g. "Unpaid") with simple "Submitted"
+                inv_name = getattr(doc, 'name', None)
+                if inv_name:
+                    frappe.db.set_value("Purchase Invoice", inv_name, "status", "Submitted", update_modified=False)
                 frappe.db.commit()
-                logger.info("after_insert: auto-submitted Purchase Invoice")
+                logger.info("after_insert: auto-submitted Purchase Invoice %s", inv_name)
         except Exception as e:
             logger.error("after_insert: auto-submit failed: %s", e)
