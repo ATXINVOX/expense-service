@@ -1,6 +1,6 @@
 from datetime import date
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 import pytest
 import sys
 
@@ -418,5 +418,141 @@ def test_purchase_invoice_bootstraps_missing_cost_center():
     
     # Verify: Company should be updated with Main CC
     mock_app.db.set_value.assert_any_call("Company", "Acme Pty Ltd", "cost_center", "Main - ACME")
+
+
+# ── Custom field (expense_item_name / expense_item_group / expense_items_count) tests ──
+
+
+def test_custom_fields_populated_from_single_item():
+    """When a PI has one item, the custom fields mirror that item."""
+    mock_frappe.db.get_value.side_effect = _default_get_value
+    mock_frappe.get_all.side_effect = _default_get_all
+
+    doc = PurchaseInvoice({
+        "doctype": "Purchase Invoice",
+        "company": "Acme Pty Ltd",
+        "items": [{"item_code": "Fuel", "item_group": "Travel", "rate": 80.0}],
+    })
+
+    doc.before_validate()
+
+    assert doc.expense_item_name == "Fuel"
+    assert doc.expense_item_group == "Travel"
+    assert doc.expense_items_count == 1
+
+
+def test_custom_fields_populated_from_first_of_multiple_items():
+    """When a PI has multiple items, custom fields use the first item."""
+    mock_frappe.db.get_value.side_effect = _default_get_value
+    mock_frappe.get_all.side_effect = _default_get_all
+
+    doc = PurchaseInvoice({
+        "doctype": "Purchase Invoice",
+        "company": "Acme Pty Ltd",
+        "items": [
+            {"item_code": "Fuel", "item_group": "Travel", "rate": 80.0},
+            {"item_code": "Telephony", "item_group": "Office", "rate": 45.0},
+        ],
+    })
+
+    doc.before_validate()
+
+    assert doc.expense_item_name == "Fuel"
+    assert doc.expense_item_group == "Travel"
+    assert doc.expense_items_count == 2
+
+
+def test_custom_fields_empty_when_no_items():
+    """When a PI has no items, custom fields default to empty."""
+    mock_frappe.db.get_value.side_effect = _default_get_value
+    mock_frappe.get_all.side_effect = _default_get_all
+
+    doc = PurchaseInvoice({
+        "doctype": "Purchase Invoice",
+        "company": "Acme Pty Ltd",
+        "items": [],
+    })
+
+    doc.before_validate()
+
+    assert doc.expense_item_name == ""
+    assert doc.expense_item_group == ""
+    assert doc.expense_items_count == 0
+
+
+def test_custom_fields_default_item_group_when_missing():
+    """When item_group is absent, expense_item_group falls back to 'All Item Groups'."""
+    mock_frappe.db.get_value.side_effect = _default_get_value
+    mock_frappe.get_all.side_effect = _default_get_all
+
+    doc = PurchaseInvoice({
+        "doctype": "Purchase Invoice",
+        "company": "Acme Pty Ltd",
+        "items": [{"item_code": "Stationery", "rate": 12.0}],
+    })
+
+    doc.before_validate()
+
+    assert doc.expense_item_name == "Stationery"
+    assert doc.expense_item_group == "All Item Groups"
+    assert doc.expense_items_count == 1
+
+
+def test_custom_fields_survive_gst_enrichment():
+    """Custom fields are set even when GST template enrichment runs."""
+    mock_frappe.db.get_value.side_effect = _default_get_value
+    mock_frappe.get_all.side_effect = _default_get_all
+
+    doc = PurchaseInvoice({
+        "doctype": "Purchase Invoice",
+        "company": "Acme Pty Ltd",
+        "taxes_and_charges": "AU GST 10%",
+        "items": [{"item_code": "Fuel", "item_group": "Travel", "rate": 100.0}],
+    })
+
+    doc.before_validate()
+
+    assert doc.expense_item_name == "Fuel"
+    assert doc.expense_item_group == "Travel"
+    assert doc.expense_items_count == 1
+    assert len(doc.taxes) == 1
+
+
+def test_custom_fields_with_no_company_returns_early():
+    """When company can't be resolved, custom fields are not set (early return)."""
+    mock_frappe.db.get_value.return_value = None
+    mock_frappe.get_all.return_value = []
+
+    doc = PurchaseInvoice({
+        "doctype": "Purchase Invoice",
+        "items": [{"item_code": "Fuel", "rate": 80.0}],
+    })
+
+    doc.before_validate()
+
+    assert not hasattr(doc, "expense_item_name") or doc.get("expense_item_name") is None
+
+
+def test_custom_fields_queryable_via_resource_api_fields():
+    """Custom fields are standard attributes, accessible like any field on the doc."""
+    mock_frappe.db.get_value.side_effect = _default_get_value
+    mock_frappe.get_all.side_effect = _default_get_all
+
+    doc = PurchaseInvoice({
+        "doctype": "Purchase Invoice",
+        "company": "Acme Pty Ltd",
+        "items": [{"item_code": "Printer Paper", "item_group": "Office Supplies", "rate": 25.0}],
+    })
+
+    doc.before_validate()
+
+    resource_fields = {
+        "expense_item_name": doc.expense_item_name,
+        "expense_item_group": doc.expense_item_group,
+        "expense_items_count": doc.expense_items_count,
+    }
+    assert resource_fields["expense_item_name"] == "Printer Paper"
+    assert resource_fields["expense_item_group"] == "Office Supplies"
+    assert resource_fields["expense_items_count"] == 1
 
 

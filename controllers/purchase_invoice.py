@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, List
 
 import frappe
 from frappe_microservice import get_app
 from frappe_microservice.controller import DocumentController
+
+logger = logging.getLogger(__name__)
 
 
 def _app_db():
@@ -14,9 +17,60 @@ def _app_db():
 DEFAULT_GST_TEMPLATE = "AU GST 10%"
 GST_MARKER = "gst"
 
+EXPENSE_CUSTOM_COLUMNS = [
+    ("expense_item_name", "varchar(140)"),
+    ("expense_item_group", "varchar(140)"),
+    ("expense_items_count", "int(11) DEFAULT 0"),
+]
+
+
+def _ensure_expense_custom_columns():
+    """Add custom columns to tabPurchase Invoice if they don't exist yet.
+
+    Runs once at import time. The columns are also created by the Frappe
+    fixture system on the central-site bench, but this guarantees they
+    exist even if the microservice starts before bench migrate runs.
+    """
+    for col_name, col_type in EXPENSE_CUSTOM_COLUMNS:
+        try:
+            frappe.db.sql(
+                f"ALTER TABLE `tabPurchase Invoice` ADD COLUMN `{col_name}` {col_type}",
+            )
+            frappe.db.commit()
+            logger.info("ensure_expense_custom_columns: added column %s to tabPurchase Invoice", col_name)
+        except Exception:
+            pass
+
+    for col_name, col_type in EXPENSE_CUSTOM_COLUMNS:
+        try:
+            frappe.db.sql("""
+                INSERT IGNORE INTO `tabCustom Field`
+                (name, dt, fieldname, fieldtype, label, module, read_only,
+                 creation, modified, modified_by, owner, docstatus, idx)
+                VALUES (%s, 'Purchase Invoice', %s, %s, %s, 'Saas Platform', 1,
+                        NOW(), NOW(), 'Administrator', 'Administrator', 0, 0)
+            """, (
+                f"Purchase Invoice-{col_name}",
+                col_name,
+                "Link" if col_name == "expense_item_group" else ("Int" if "count" in col_name else "Data"),
+                col_name.replace("expense_", "").replace("_", " ").title(),
+            ))
+        except Exception:
+            pass
+    try:
+        frappe.db.commit()
+    except Exception:
+        pass
+
+
+try:
+    _ensure_expense_custom_columns()
+except Exception as e:
+    logger.warning("ensure_expense_custom_columns: skipped (%s)", e)
+
 
 def _create_system_doc(doctype: str, values: Dict[str, Any], **insert_kwargs):
-    print(f"DEBUG: _create_system_doc calling insert_doc for {doctype} with values keys {list(values.keys())} and insert_kwargs {insert_kwargs}")
+    logger.debug("_create_system_doc: %s keys=%s", doctype, list(values.keys()))
     doc = _app_db().insert_doc(doctype, values, ignore_permissions=True, **insert_kwargs)
     frappe.db.commit()
     return doc
@@ -559,42 +613,46 @@ def _resolve_item_identity(item: Any) -> tuple[str | None, str | None]:
 class PurchaseInvoice(DocumentController):
     """
     Auto-populate accounting values for Purchase Invoice records created by the mobile app.
+
+    Custom fields populated on every save:
+      - expense_item_name  : primary item's display name
+      - expense_item_group : primary item's group (Link → Item Group)
+      - expense_items_count: total number of line items
     """
 
     def before_validate(self):
-        # Resolve company from session user defaults; fall back to payload value.
-        # This runs before ERPNext's own validate() so link fields are fixed in time.
         company = _resolve_company_from_user() or _value(self, "company", None)
         if not company:
+            logger.warning("before_validate: no company resolved, skipping enrichment")
             return
         _set_value(self, "company", company)
+        logger.info("before_validate: company=%s", company)
 
-        # Bootstrap company defaults and fiscal year if missing
         _get_default_cost_center(company)
         _ensure_default_payable_account(company)
         _ensure_fiscal_year(_value(self, "posting_date", None), company)
 
-        # Auto-create supplier so ERPNext's link validation passes.
-        # Fall back to "General Supplier" when the frontend doesn't send one.
         supplier_value = _value(self, "supplier", None)
         if not supplier_value or not str(supplier_value).strip():
             supplier_value = "General Supplier"
         supplier = _resolve_supplier_name(supplier_value)
         if supplier:
             _set_value(self, "supplier", supplier)
+            logger.debug("before_validate: supplier=%s", supplier)
 
         cost_center = _get_default_cost_center(company)
         raw_items = list(_value(self, "items", []) or [])
         self.set("items", [])
-        
-        for item_data in raw_items:
+
+        primary_item_name = None
+        primary_item_group = None
+
+        for idx, item_data in enumerate(raw_items):
             item_code, item_group = _resolve_item_identity(item_data)
             if not item_code:
-                # Add back even if unresolvable to preserve original data
                 self.append("items", item_data)
                 continue
 
-            # Auto-create Item so ERPNext's link validation passes.
             resolved_code = _resolve_item_code(item_code, item_group)
             _set_value(item_data, "item_code", resolved_code)
             if _value(item_data, "item_name"):
@@ -605,11 +663,22 @@ class PurchaseInvoice(DocumentController):
                 _set_value(item_data, "expense_account", expense_account)
             if cost_center:
                 _set_value(item_data, "cost_center", cost_center)
-            
+
             self.append("items", item_data)
 
-        # Resolve the real GST template that exists in this ERPNext instance.
-        # Mobile sends taxes_and_charges as non-empty string to signal GST intent.
+            if idx == 0:
+                primary_item_name = item_code
+                primary_item_group = item_group
+                logger.debug("before_validate: primary item=%s group=%s", item_code, item_group)
+
+        _set_value(self, "expense_item_name", primary_item_name or "")
+        _set_value(self, "expense_item_group", primary_item_group or "")
+        _set_value(self, "expense_items_count", len(raw_items))
+        logger.info(
+            "before_validate: expense_item_name=%s, expense_item_group=%s, expense_items_count=%d",
+            primary_item_name, primary_item_group, len(raw_items),
+        )
+
         wants_gst = bool(_value(self, "taxes_and_charges", None))
         existing_taxes = [
             _serialise(tax) for tax in _value(self, "taxes", []) or []
@@ -623,11 +692,13 @@ class PurchaseInvoice(DocumentController):
                 self.set("taxes", [])
                 for row in manual_taxes + _gst_template_rows(company, gst_template):
                     self.append("taxes", row)
+                logger.debug("before_validate: GST template=%s applied", gst_template)
             else:
                 _set_value(self, "taxes_and_charges", "")
                 self.set("taxes", [])
                 for row in manual_taxes:
                     self.append("taxes", row)
+                logger.debug("before_validate: no GST template found for company=%s", company)
         else:
             _set_value(self, "taxes_and_charges", "")
             self.set("taxes", [])
@@ -645,5 +716,6 @@ class PurchaseInvoice(DocumentController):
                 doc.docstatus = 1
                 doc.save(ignore_permissions=True)
                 frappe.db.commit()
+                logger.info("after_insert: auto-submitted Purchase Invoice")
         except Exception as e:
-            print(f"WARNING: Auto-submit failed for Purchase Invoice: {e}")
+            logger.error("after_insert: auto-submit failed: %s", e)
