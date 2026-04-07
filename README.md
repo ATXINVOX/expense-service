@@ -25,7 +25,7 @@ It uses a strict Frappe-style API surface and keeps the mobile payloads minimal:
 - dashboard data is computed by `get_dashboard_summary` as a custom endpoint
 
 ### Important behavior
-- New `Purchase Invoice` rows stay **Draft** until the user confirms; then call `POST /api/method/expense_tracker.api.submit_purchase_invoice` with JSON `{"name":"<invoice name>"}` (or `invoice_name`) to set **Submitted** (`docstatus` 1).
+- New `Purchase Invoice` rows stay **Draft** until the user confirms. Typical flow: **POST** minimal body to `/api/resource/Purchase Invoice` (draft), optional **PUT** `/api/resource/Purchase Invoice/{name}` to update fields (e.g. `remarks`), then **POST** `/api/method/expense_tracker.api.submit_purchase_invoice` with JSON `{"name":"<invoice name>"}` (or `invoice_name`) to set **Submitted** (`docstatus` 1). See `test_expense_flow.sh` for a full curl example.
 - Cost centre is internal and always resolved by service.
 - `Item Group` is used for category-like grouping in the mobile UI.
 - `get_dashboard_summary` does not take a `company` argument.
@@ -72,6 +72,7 @@ Example create payloads:
 ### Custom API
 - `GET /api/method/expense_tracker.api.get_dashboard_summary`
 - `POST /api/method/expense_tracker.api.submit_purchase_invoice` — body `{"name":"<Purchase Invoice name>"}` (draft → submitted)
+- `POST /api/method/expense_tracker.api.cancel_purchase_invoice` — body `{"name":"<Purchase Invoice name>"}` (submitted → cancelled, docstatus 2)
 
 ## Kong
 `manifests/kong/kong-configmap.yaml` exposes:

@@ -79,6 +79,18 @@ def _create_system_doc(doctype: str, values: Dict[str, Any], **insert_kwargs):
     return doc
 
 
+def _ensure_cost_center_by_name(expected_name: str, values: Dict[str, Any], **insert_kwargs) -> str:
+    """Insert Cost Center if missing. Uses global name check: tenant-scoped get_value can
+    miss rows with NULL/mismatched tenant_id while INSERT still hits PRIMARY duplicate."""
+    if frappe.db.exists("Cost Center", expected_name):
+        return expected_name
+    try:
+        return _create_system_doc("Cost Center", values, **insert_kwargs).name
+    except frappe.DuplicateEntryError:
+        frappe.db.rollback()
+        return expected_name
+
+
 def _ensure_fiscal_year(posting_date: str | None, company: str):
     """Create a Fiscal Year covering the posting_date if none exists."""
     from datetime import date as _date, datetime as _datetime
@@ -294,34 +306,26 @@ def _get_default_cost_center(company: str):
 
     abbr = _company_abbr(company)
     root_name = f"{company} - {abbr}"
-    print(f"DEBUG: root_name={root_name}")
-    if not _app_db().get_value("Cost Center", root_name, "name"):
-        print(f"DEBUG: Creating root cost center")
-        root_doc = _create_system_doc(
-            "Cost Center",
-            {
-                "cost_center_name": company,
-                "company": company,
-                "is_group": 1,
-            },
-            ignore_mandatory=True,
-        )
-        root_name = root_doc.name
+    root_name = _ensure_cost_center_by_name(
+        root_name,
+        {
+            "cost_center_name": company,
+            "company": company,
+            "is_group": 1,
+        },
+        ignore_mandatory=True,
+    )
 
     cost_center_name = f"Main - {abbr}"
-    print(f"DEBUG: cost_center_name={cost_center_name}")
-    if not _app_db().get_value("Cost Center", cost_center_name, "name"):
-        print(f"DEBUG: Creating main cost center")
-        leaf_doc = _create_system_doc(
-            "Cost Center",
-            {
-                "cost_center_name": "Main",
-                "company": company,
-                "parent_cost_center": root_name,
-                "is_group": 0,
-            },
-        )
-        cost_center_name = leaf_doc.name
+    cost_center_name = _ensure_cost_center_by_name(
+        cost_center_name,
+        {
+            "cost_center_name": "Main",
+            "company": company,
+            "parent_cost_center": root_name,
+            "is_group": 0,
+        },
+    )
 
     # Set as default for the company
     _app_db().set_value("Company", company, "cost_center", cost_center_name)
@@ -641,6 +645,13 @@ class PurchaseInvoice(DocumentController):
     """
 
     def before_validate(self):
+        doc = self.doc
+        # insert_doc() runs DocumentHooks.before_validate, then Frappe doc.insert()
+        # runs before_validate again via run_before_save_methods — without this guard,
+        # items/taxes are rebuilt twice and child rows duplicate → DuplicateEntryError.
+        if getattr(doc.flags, "expense_pi_enriched", False):
+            return
+
         company = _resolve_company_from_user() or _value(self, "company", None)
         if not company:
             logger.warning("before_validate: no company resolved, skipping enrichment")
@@ -730,3 +741,5 @@ class PurchaseInvoice(DocumentController):
             self.set("taxes", [])
             for row in manual_taxes:
                 self.append("taxes", row)
+
+        doc.flags.expense_pi_enriched = True

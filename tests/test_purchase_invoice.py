@@ -78,7 +78,12 @@ if "flask" not in sys.modules:
     sys.modules["flask"] = _flask_stub
 
 from controllers.purchase_invoice import PurchaseInvoice, _expense_title
-from expense_tracker.api import get_dashboard_summary, submit_purchase_invoice, _app_db
+from expense_tracker.api import (
+    cancel_purchase_invoice,
+    get_dashboard_summary,
+    submit_purchase_invoice,
+    _app_db,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -728,5 +733,44 @@ def test_submit_purchase_invoice_retries_status_when_not_submitted():
     submit_purchase_invoice("user@example.com")
 
     assert mock_frappe.db.set_value.call_count >= 2
+
+
+# ── cancel_purchase_invoice (submitted → cancelled) ────────────────────────────
+
+
+def test_cancel_purchase_invoice_success():
+    sys.modules["flask"].request.get_json.return_value = {"name": "ACC-PINV-2026-00001"}
+    mock_frappe.defaults = MagicMock()
+    mock_frappe.defaults.get_user_default.return_value = "Acme Pty Ltd"
+    mock_frappe.db.get_value.return_value = {
+        "docstatus": 1,
+        "company": "Acme Pty Ltd",
+    }
+
+    result = cancel_purchase_invoice("user@example.com")
+
+    assert result == {
+        "success": True,
+        "name": "ACC-PINV-2026-00001",
+        "docstatus": 2,
+        "status": "Cancelled",
+    }
+    mock_frappe.db.set_value.assert_called_with(
+        "Purchase Invoice",
+        "ACC-PINV-2026-00001",
+        {"docstatus": 2, "status": "Cancelled"},
+    )
+
+
+def test_cancel_purchase_invoice_rejects_draft():
+    sys.modules["flask"].request.get_json.return_value = {"name": "PI-1"}
+    mock_frappe.defaults = MagicMock()
+    mock_frappe.defaults.get_user_default.return_value = "Acme Pty Ltd"
+    mock_frappe.db.get_value.return_value = {
+        "docstatus": 0,
+        "company": "Acme Pty Ltd",
+    }
+    with pytest.raises(mock_frappe.ValidationError, match="Only submitted"):
+        cancel_purchase_invoice("user@example.com")
 
 
