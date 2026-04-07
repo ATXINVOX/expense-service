@@ -54,7 +54,7 @@ sys.modules["frappe_microservice"] = mock_microservice
 sys.modules["frappe_microservice.controller"] = mock_microservice_controller
 
 
-from controllers.purchase_invoice import PurchaseInvoice
+from controllers.purchase_invoice import PurchaseInvoice, _expense_title
 from expense_tracker.api import get_dashboard_summary, _app_db
 
 
@@ -423,6 +423,13 @@ def test_purchase_invoice_bootstraps_missing_cost_center():
 # ── Custom field (expense_item_name / expense_item_group / expense_items_count) tests ──
 
 
+def test_expense_title_maps_to_what_was_bought():
+    assert _expense_title("Milk 2L", 1, None) == "Milk 2L"
+    assert _expense_title("Milk 2L", 3, None) == "Milk 2L (+2 more)"
+    assert _expense_title("", 0, "Pantry restock") == "Pantry restock"
+    assert _expense_title(None, 0, "") == ""
+
+
 def test_custom_fields_populated_from_single_item():
     """When a PI has one item, the custom fields mirror that item."""
     mock_frappe.db.get_value.side_effect = _default_get_value
@@ -439,6 +446,7 @@ def test_custom_fields_populated_from_single_item():
     assert doc.expense_item_name == "Fuel"
     assert doc.expense_item_group == "Travel"
     assert doc.expense_items_count == 1
+    assert doc.title == "Fuel"
 
 
 def test_custom_fields_populated_from_first_of_multiple_items():
@@ -460,6 +468,7 @@ def test_custom_fields_populated_from_first_of_multiple_items():
     assert doc.expense_item_name == "Fuel"
     assert doc.expense_item_group == "Travel"
     assert doc.expense_items_count == 2
+    assert doc.title == "Fuel (+1 more)"
 
 
 def test_custom_fields_empty_when_no_items():
