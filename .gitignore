@@ -1,4 +1,7 @@
 node_modules/
+cypress/cucumber-json/
+cypress/videos/
+cypress/screenshots/
 __pycache__/
 *.pyc
 .env
