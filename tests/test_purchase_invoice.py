@@ -12,9 +12,13 @@ if str(ROOT) not in sys.path:
 
 
 class MockDocumentController:
+    """Mirrors DocumentController enough for PurchaseInvoice hooks: .doc, .flags, fields on doc."""
+
     def __init__(self, data):
+        self.flags = type("Flags", (), {})()
         for key, value in data.items():
             setattr(self, key, value)
+        self.doc = self
 
     def set(self, key, value):
         setattr(self, key, value)
@@ -742,10 +746,13 @@ def test_cancel_purchase_invoice_success():
     sys.modules["flask"].request.get_json.return_value = {"name": "ACC-PINV-2026-00001"}
     mock_frappe.defaults = MagicMock()
     mock_frappe.defaults.get_user_default.return_value = "Acme Pty Ltd"
-    mock_frappe.db.get_value.return_value = {
-        "docstatus": 1,
-        "company": "Acme Pty Ltd",
-    }
+
+    def _gv(*args, **kwargs):
+        if args and args[0] == "Purchase Invoice":
+            return {"docstatus": 1, "company": "Acme Pty Ltd"}
+        return None
+
+    mock_frappe.db.get_value.side_effect = _gv
 
     result = cancel_purchase_invoice("user@example.com")
 
@@ -766,10 +773,14 @@ def test_cancel_purchase_invoice_rejects_draft():
     sys.modules["flask"].request.get_json.return_value = {"name": "PI-1"}
     mock_frappe.defaults = MagicMock()
     mock_frappe.defaults.get_user_default.return_value = "Acme Pty Ltd"
-    mock_frappe.db.get_value.return_value = {
-        "docstatus": 0,
-        "company": "Acme Pty Ltd",
-    }
+
+    def _gv(*args, **kwargs):
+        if args and args[0] == "Purchase Invoice":
+            return {"docstatus": 0, "company": "Acme Pty Ltd"}
+        return None
+
+    mock_frappe.db.get_value.side_effect = _gv
+
     with pytest.raises(mock_frappe.ValidationError, match="Only submitted"):
         cancel_purchase_invoice("user@example.com")
 
