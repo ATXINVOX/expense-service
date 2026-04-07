@@ -171,6 +171,31 @@ PINV2_NAME=$(echo "$PINV2_BODY" | python3 -c "import sys,json; print(json.load(s
 echo "✓ Minimal Purchase Invoice created: $PINV2_NAME"
 echo ""
 
+# ─── Submit drafts (simulates user tap “Confirm”) ─────────────────────
+echo "──── Submit drafts: POST expense_tracker.api.submit_purchase_invoice ────"
+for INV in "$PINV1_NAME" "$PINV2_NAME"; do
+  if [[ -z "$INV" || "$INV" == "N/A" ]]; then
+    echo "SKIP submit (invalid name)"
+    continue
+  fi
+  export INV
+  SUB_PAYLOAD=$(python3 -c 'import json, os; print(json.dumps({"name": os.environ["INV"]}))')
+  SUB_RESP=$(curl -s -w "\n%{http_code}" -X POST \
+    "$BASE_URL/api/method/expense_tracker.api.submit_purchase_invoice" \
+    "${HEADERS[@]}" \
+    -d "$SUB_PAYLOAD")
+  SUB_HTTP=$(echo "$SUB_RESP" | tail -1)
+  SUB_BODY=$(echo "$SUB_RESP" | sed '$d')
+  echo "  $INV → HTTP $SUB_HTTP"
+  echo "$SUB_BODY" | python3 -m json.tool 2>/dev/null || echo "$SUB_BODY"
+  if [[ "$SUB_HTTP" -lt 200 || "$SUB_HTTP" -ge 300 ]]; then
+    echo "FAILED: submit_purchase_invoice for $INV"
+    exit 1
+  fi
+done
+echo "✓ Both invoices submitted"
+echo ""
+
 # ─── Step 5: Fetch expenses via resource API with custom fields ──────
 echo "──── Step 5: GET /api/resource/Purchase Invoice (with custom fields) ────"
 FIELDS="name,company,supplier,posting_date,grand_total,total_taxes_and_charges,remarks,docstatus,status,expense_item_name,expense_item_group,expense_items_count"

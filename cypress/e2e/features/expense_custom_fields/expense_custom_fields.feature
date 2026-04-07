@@ -4,6 +4,15 @@ Feature: Expense custom fields on Purchase Invoice
   standard Frappe resource API (/api/resource/Purchase Invoice) to return all
   expense details in a single call — no custom API endpoint required.
 
+  Lifecycle: new expenses are saved as Draft (docstatus 0). After the user
+  confirms, call POST /api/method/expense_tracker.api.submit_purchase_invoice
+  with {"name":"<invoice name>"} to set Submitted. Executable BDD for that flow
+  lives in expense_submit/expense_draft_submit.feature (step definitions in
+  cypress/support/step_definitions/expense_api_steps.js).
+
+  The scenarios below are specification placeholders; wire them to Cypress steps
+  or run pytest tests/test_purchase_invoice.py for TDD coverage.
+
   Background:
     Given I am logged in as a provisioned user
     And my company has a default chart of accounts

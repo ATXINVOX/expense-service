@@ -4,6 +4,8 @@ from datetime import date, datetime
 import frappe
 from frappe_microservice import get_app
 
+from controllers.purchase_invoice import _expense_title
+
 
 def _safe_date(value, default_factory):
     if value is None:
@@ -161,6 +163,76 @@ def get_expenses(user, from_date=None, to_date=None, limit=None, offset=None):
         "company": company,
         "count": len(invoices),
         "data": invoices,
+    }
+
+
+@get_app().secure_route(
+    "/api/method/expense_tracker.api.submit_purchase_invoice", methods=["POST"]
+)
+def submit_purchase_invoice(user):
+    """Confirm a draft expense: set docstatus 1 and status Submitted (direct DB update)."""
+    from flask import request
+
+    payload = request.get_json(silent=True) or {}
+    name = (payload.get("name") or payload.get("invoice_name") or "").strip()
+    if not name:
+        frappe.throw(
+            "name or invoice_name is required in JSON body",
+            frappe.ValidationError,
+        )
+
+    company = _resolve_company()
+    if not company:
+        frappe.throw("Company is required", frappe.ValidationError)
+
+    row = frappe.db.get_value(
+        "Purchase Invoice",
+        name,
+        [
+            "docstatus",
+            "company",
+            "expense_item_name",
+            "expense_items_count",
+            "remarks",
+        ],
+        as_dict=True,
+    )
+    if not row:
+        frappe.throw(f"Purchase Invoice {name!r} not found", frappe.DoesNotExistError)
+
+    inv_company = (row.get("company") or "").strip()
+    if inv_company and inv_company != company:
+        frappe.throw("You do not have access to this expense", frappe.PermissionError)
+
+    if int(row.get("docstatus") or 0) != 0:
+        frappe.throw(
+            "Only draft expenses (docstatus 0) can be submitted; "
+            f"this document is already docstatus {row.get('docstatus')}",
+            frappe.ValidationError,
+        )
+
+    expense_title = _expense_title(
+        row.get("expense_item_name"),
+        int(row.get("expense_items_count") or 0),
+        row.get("remarks"),
+    )
+    updates: dict = {"docstatus": 1, "status": "Submitted"}
+    if expense_title:
+        updates["title"] = expense_title
+
+    frappe.db.set_value("Purchase Invoice", name, updates)
+    frappe.db.commit()
+
+    saved_status = frappe.db.get_value("Purchase Invoice", name, "status")
+    if saved_status != "Submitted":
+        frappe.db.set_value("Purchase Invoice", name, "status", "Submitted")
+        frappe.db.commit()
+
+    return {
+        "success": True,
+        "name": name,
+        "docstatus": 1,
+        "status": "Submitted",
     }
 
 

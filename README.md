@@ -25,6 +25,7 @@ It uses a strict Frappe-style API surface and keeps the mobile payloads minimal:
 - dashboard data is computed by `get_dashboard_summary` as a custom endpoint
 
 ### Important behavior
+- New `Purchase Invoice` rows stay **Draft** until the user confirms; then call `POST /api/method/expense_tracker.api.submit_purchase_invoice` with JSON `{"name":"<invoice name>"}` (or `invoice_name`) to set **Submitted** (`docstatus` 1).
 - Cost centre is internal and always resolved by service.
 - `Item Group` is used for category-like grouping in the mobile UI.
 - `get_dashboard_summary` does not take a `company` argument.
@@ -70,12 +71,14 @@ Example create payloads:
 
 ### Custom API
 - `GET /api/method/expense_tracker.api.get_dashboard_summary`
+- `POST /api/method/expense_tracker.api.submit_purchase_invoice` — body `{"name":"<Purchase Invoice name>"}` (draft → submitted)
 
 ## Kong
 `manifests/kong/kong-configmap.yaml` exposes:
 - `/api/resource/Purchase Invoice`
 - `/api/resource/Item Group`
 - `/api/method/expense_tracker.api.get_dashboard_summary`
+- `/api/method/expense_tracker.api.submit_purchase_invoice`
 
 ## Contract notes for mobile
 - Supplier creation is transparent: sending a new supplier name will create the `Supplier` record.
@@ -85,15 +88,18 @@ Example create payloads:
 - Item Group creation follows standard Frappe Resource API behavior (POST on `/api/resource/Item Group`).
 
 ## Tests
-- `tests/test_purchase_invoice.py` covers:
-- enrichment logic
-- supplier auto-create
-- dashboard summary
-- `tests/test_server.py` covers exposed resources:
-- `Purchase Invoice`
-- `Item Group`
+### TDD (pytest)
+- `tests/test_purchase_invoice.py` — enrichment, custom fields, `get_dashboard_summary`, **`submit_purchase_invoice`** (draft → submit validation and DB updates)
+- `tests/test_server.py` — registered resources
 
-Run tests with:
 ```bash
-pytest
+cd expense-service && PYTHONPATH=. pytest tests/
+```
+
+### BDD (Cypress + Cucumber)
+- `cypress/e2e/features/expense_submit/expense_draft_submit.feature` — end-to-end draft create, GET docstatus, POST submit, GET submitted (requires running API + `EXPENSE_TEST_SID`)
+- `cypress/e2e/features/expense_custom_fields/expense_custom_fields.feature` — spec / future steps for custom-field behaviour
+
+```bash
+cd expense-service && npm install && npx cypress run --spec 'cypress/e2e/features/expense_submit/**/*.feature' --env EXPENSE_TEST_SID=your_sid
 ```

@@ -629,6 +629,10 @@ class PurchaseInvoice(DocumentController):
     """
     Auto-populate accounting values for Purchase Invoice records created by the mobile app.
 
+    Create flow: POST keeps the document as Draft (docstatus 0). After the user confirms,
+    the app calls POST /api/method/expense_tracker.api.submit_purchase_invoice with the
+    invoice name to set docstatus 1 and status Submitted (same DB update path as before).
+
     Custom fields populated on every save:
       - expense_item_name  : primary item's display name
       - expense_item_group : primary item's group (Link → Item Group)
@@ -726,59 +730,3 @@ class PurchaseInvoice(DocumentController):
             self.set("taxes", [])
             for row in manual_taxes:
                 self.append("taxes", row)
-
-    def after_insert(self):
-        """Auto-submit the Purchase Invoice so it's not left as Draft.
-
-        Uses direct DB writes instead of doc.save()/doc.submit() to avoid
-        ERPNext's submission workflow which can fail on accounting validations
-        or override the status to 'Unpaid' based on outstanding amounts.
-        The expense tracker only uses two statuses: Draft and Submitted.
-        """
-        doc = self.doc if hasattr(self, 'doc') and self.doc else self
-        inv_name = getattr(doc, 'name', None)
-
-        if not inv_name or getattr(doc, 'docstatus', 0) != 0:
-            return
-
-        try:
-            expense_title = _expense_title(
-                getattr(doc, "expense_item_name", None),
-                int(getattr(doc, "expense_items_count", 0) or 0),
-                getattr(doc, "remarks", None),
-            )
-            updates: dict = {"docstatus": 1, "status": "Submitted"}
-            if expense_title:
-                updates["title"] = expense_title
-
-            frappe.db.set_value(
-                "Purchase Invoice",
-                inv_name,
-                updates,
-            )
-            frappe.db.commit()
-
-            saved_status = frappe.db.get_value(
-                "Purchase Invoice", inv_name, "status",
-            )
-            if saved_status != "Submitted":
-                logger.warning(
-                    "after_insert: status verification failed for %s — "
-                    "expected 'Submitted', got '%s'",
-                    inv_name, saved_status,
-                )
-                frappe.db.set_value(
-                    "Purchase Invoice", inv_name, "status", "Submitted",
-                )
-                frappe.db.commit()
-
-            doc.docstatus = 1
-            doc.status = "Submitted"
-            if expense_title:
-                doc.title = expense_title
-            logger.info("after_insert: auto-submitted Purchase Invoice %s", inv_name)
-        except Exception:
-            logger.exception(
-                "after_insert: auto-submit failed for Purchase Invoice %s",
-                inv_name,
-            )
