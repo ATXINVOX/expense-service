@@ -236,6 +236,60 @@ def submit_purchase_invoice(user):
     }
 
 
+@get_app().secure_route(
+    "/api/method/expense_tracker.api.cancel_purchase_invoice", methods=["POST"]
+)
+def cancel_purchase_invoice(user):
+    """Cancel a submitted expense: set docstatus 2 and status Cancelled (direct DB update)."""
+    from flask import request
+
+    payload = request.get_json(silent=True) or {}
+    name = (payload.get("name") or payload.get("invoice_name") or "").strip()
+    if not name:
+        frappe.throw(
+            "name or invoice_name is required in JSON body",
+            frappe.ValidationError,
+        )
+
+    company = _resolve_company()
+    if not company:
+        frappe.throw("Company is required", frappe.ValidationError)
+
+    row = frappe.db.get_value(
+        "Purchase Invoice",
+        name,
+        ["docstatus", "company"],
+        as_dict=True,
+    )
+    if not row:
+        frappe.throw(f"Purchase Invoice {name!r} not found", frappe.DoesNotExistError)
+
+    inv_company = (row.get("company") or "").strip()
+    if inv_company and inv_company != company:
+        frappe.throw("You do not have access to this expense", frappe.PermissionError)
+
+    if int(row.get("docstatus") or 0) != 1:
+        frappe.throw(
+            "Only submitted expenses (docstatus 1) can be cancelled; "
+            f"this document is docstatus {row.get('docstatus')}",
+            frappe.ValidationError,
+        )
+
+    frappe.db.set_value(
+        "Purchase Invoice",
+        name,
+        {"docstatus": 2, "status": "Cancelled"},
+    )
+    frappe.db.commit()
+
+    return {
+        "success": True,
+        "name": name,
+        "docstatus": 2,
+        "status": "Cancelled",
+    }
+
+
 @get_app().secure_route('/api/method/expense_tracker.api.get_dashboard_summary', methods=['GET'])
 def get_dashboard_summary(user, from_date=None, to_date=None):
     db = _app_db()
