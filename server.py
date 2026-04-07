@@ -1,6 +1,7 @@
+import os
+
 from frappe_microservice import create_microservice, setup_controllers
 import frappe_microservice.controller as controller_module
-import os
 
 # Initialize microservice
 app = create_microservice(
@@ -21,8 +22,27 @@ if hasattr(controller_module, "get_controller_registry"):
     controller_module._registry = controller_module.get_controller_registry()
 setup_controllers(app, controllers_directory=controllers_dir)
 
+
+def _purchase_invoice_get(user, name):
+    """GET one — body from frappe.as_json() so timedelta/date never hit Flask jsonify()."""
+    import frappe
+    from flask import Response
+
+    try:
+        doc = app.tenant_db.get_doc("Purchase Invoice", name)
+        body = frappe.as_json(doc.as_dict())
+        return Response(body, mimetype="application/json", status=200)
+    except frappe.PermissionError:
+        return {"error": "Access denied"}, 403
+    except frappe.DoesNotExistError:
+        return {"error": "Purchase Invoice not found"}, 404
+
+
 # Register resources for this service. Item Group is used for expense category grouping.
-app.register_resource("Purchase Invoice")
+app.register_resource(
+    "Purchase Invoice",
+    custom_handlers={"get": _purchase_invoice_get},
+)
 app.register_resource("Item Group")
 app.register_resource("Item")
 

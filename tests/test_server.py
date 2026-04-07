@@ -36,7 +36,11 @@ def test_server_registers_purchase_invoice_and_item_group_resources():
         import_module("server")
         fake_ms.create_microservice.assert_called()
         fake_ms.setup_controllers.assert_called()
-        app.register_resource.assert_any_call("Purchase Invoice")
+        pi_registered = any(
+            c.args and c.args[0] == "Purchase Invoice"
+            for c in app.register_resource.call_args_list
+        )
+        assert pi_registered, "Purchase Invoice resource should be registered"
         app.register_resource.assert_any_call("Item Group")
     finally:
         if original_ms is not None:
