@@ -613,6 +613,18 @@ def _resolve_item_identity(item: Any) -> tuple[str | None, str | None]:
     return candidate_code, item_group
 
 
+def _expense_title(primary_item: str | None, items_count: int, remarks: str | None) -> str:
+    """List / document title: what was purchased, not the supplier."""
+    primary = (primary_item or "").strip()
+    if primary:
+        n = max(int(items_count or 0), 0)
+        if n > 1:
+            return f"{primary} (+{n - 1} more)"[:140]
+        return primary[:140]
+    rem = (remarks or "").strip()
+    return rem[:140] if rem else ""
+
+
 class PurchaseInvoice(DocumentController):
     """
     Auto-populate accounting values for Purchase Invoice records created by the mobile app.
@@ -621,6 +633,7 @@ class PurchaseInvoice(DocumentController):
       - expense_item_name  : primary item's display name
       - expense_item_group : primary item's group (Link → Item Group)
       - expense_items_count: total number of line items
+      - title              : human title — primary line item(s), not supplier
     """
 
     def before_validate(self):
@@ -682,6 +695,12 @@ class PurchaseInvoice(DocumentController):
             primary_item_name, primary_item_group, len(raw_items),
         )
 
+        expense_title = _expense_title(
+            primary_item_name, len(raw_items), _value(self, "remarks", None),
+        )
+        if expense_title:
+            _set_value(self, "title", expense_title)
+
         wants_gst = bool(_value(self, "taxes_and_charges", None))
         existing_taxes = [
             _serialise(tax) for tax in _value(self, "taxes", []) or []
@@ -723,10 +742,19 @@ class PurchaseInvoice(DocumentController):
             return
 
         try:
+            expense_title = _expense_title(
+                getattr(doc, "expense_item_name", None),
+                int(getattr(doc, "expense_items_count", 0) or 0),
+                getattr(doc, "remarks", None),
+            )
+            updates: dict = {"docstatus": 1, "status": "Submitted"}
+            if expense_title:
+                updates["title"] = expense_title
+
             frappe.db.set_value(
                 "Purchase Invoice",
                 inv_name,
-                {"docstatus": 1, "status": "Submitted"},
+                updates,
             )
             frappe.db.commit()
 
@@ -746,6 +774,8 @@ class PurchaseInvoice(DocumentController):
 
             doc.docstatus = 1
             doc.status = "Submitted"
+            if expense_title:
+                doc.title = expense_title
             logger.info("after_insert: auto-submitted Purchase Invoice %s", inv_name)
         except Exception:
             logger.exception(
