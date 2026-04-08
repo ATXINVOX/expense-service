@@ -59,8 +59,8 @@ jobs:
           # Generate a minimal pyproject.toml so pip can install the directory.
           cat > /tmp/ms-src/pyproject.toml << 'TOML'
           [build-system]
-          requires = ["setuptools"]
-          build-backend = "setuptools.backends.legacy:build"
+          requires = ["setuptools>=42"]
+          build-backend = "setuptools.build_meta"
           [project]
           name = "frappe-microservice"
           version = "1.4.0"
