@@ -40,6 +40,11 @@ jobs:
   integration-test:
     needs: test
     runs-on: ubuntu-latest
+    env:
+      # Consistent volume mount path for all docker compose calls in this job.
+      # The lib is extracted from the GHCR image into /tmp/ms-src in the
+      # "Extract frappe-microservice" step and mounted as /mnt/lib.
+      MS_LIB_PATH: /tmp/ms-src
     steps:
       - name: Checkout expense-service
         uses: actions/checkout@v4
@@ -69,7 +74,7 @@ jobs:
           PYEOF
 
       - name: Start integration container
-        run: MS_LIB_PATH=/tmp/ms-src docker compose -f docker-compose.integration.yml up -d
+        run: docker compose -f docker-compose.integration.yml up -d
 
       - name: Wait for Frappe site
         run: |
