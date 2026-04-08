@@ -662,8 +662,11 @@ def test_submit_purchase_invoice_requires_name():
     sys.modules["flask"].request.get_json.return_value = {}
     mock_frappe.defaults = MagicMock()
     mock_frappe.defaults.get_user_default.return_value = "Acme Pty Ltd"
-    with pytest.raises(mock_frappe.ValidationError, match="name or invoice_name"):
-        submit_purchase_invoice("user@example.com")
+    body, code = submit_purchase_invoice("user@example.com")
+    assert code == 400
+    assert body["status"] == "error"
+    assert body["type"] == "ValidationError"
+    assert "name or invoice_name" in body["message"]
 
 
 def test_submit_purchase_invoice_requires_company():
@@ -672,8 +675,10 @@ def test_submit_purchase_invoice_requires_company():
     mock_frappe.session = MagicMock()
     mock_frappe.session.user = "Guest"
     mock_frappe.db.get_value.return_value = None
-    with pytest.raises(mock_frappe.ValidationError, match="Company is required"):
-        submit_purchase_invoice("user@example.com")
+    body, code = submit_purchase_invoice("user@example.com")
+    assert code == 400
+    assert body["type"] == "ValidationError"
+    assert "Company is required" in body["message"]
 
 
 def test_submit_purchase_invoice_not_found():
@@ -682,8 +687,10 @@ def test_submit_purchase_invoice_not_found():
     mock_frappe.defaults.get_user_default.return_value = "Acme Pty Ltd"
     mock_frappe.db.get_value.side_effect = None
     mock_frappe.db.get_value.return_value = None
-    with pytest.raises(mock_frappe.DoesNotExistError):
-        submit_purchase_invoice("user@example.com")
+    body, code = submit_purchase_invoice("user@example.com")
+    assert code == 404
+    assert body["type"] == "DoesNotExistError"
+    assert "missing" in body["message"]
 
 
 def test_submit_purchase_invoice_wrong_company():
@@ -698,8 +705,10 @@ def test_submit_purchase_invoice_wrong_company():
         "expense_items_count": 1,
         "remarks": None,
     }
-    with pytest.raises(mock_frappe.PermissionError):
-        submit_purchase_invoice("user@example.com")
+    body, code = submit_purchase_invoice("user@example.com")
+    assert code == 403
+    assert body["type"] == "PermissionError"
+    assert "do not have access" in body["message"]
 
 
 def test_submit_purchase_invoice_rejects_non_draft():
@@ -714,8 +723,10 @@ def test_submit_purchase_invoice_rejects_non_draft():
         "expense_items_count": 1,
         "remarks": None,
     }
-    with pytest.raises(mock_frappe.ValidationError, match="Only draft"):
-        submit_purchase_invoice("user@example.com")
+    body, code = submit_purchase_invoice("user@example.com")
+    assert code == 400
+    assert body["type"] == "ValidationError"
+    assert "Only draft" in body["message"]
 
 
 def test_submit_purchase_invoice_retries_status_when_not_submitted():
