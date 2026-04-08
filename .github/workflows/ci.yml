@@ -210,6 +210,12 @@ jobs:
           docker compose -f docker-compose.integration.yml \
             --profile cypress run --rm cypress
 
+      - name: Dump expense-service logs (debug)
+        if: always()
+        run: |
+          docker compose -f docker-compose.integration.yml exec -T dev-central-site \
+            tail -80 /home/frappe/logs/expense-service.log 2>/dev/null || echo "(no log)"
+
       - name: Tear down
         if: always()
         run: docker compose -f docker-compose.integration.yml --profile cypress down -v
