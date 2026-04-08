@@ -352,8 +352,6 @@ class TestDashboardSummary:
         test_accounts, ensure_fiscal_year, test_company,
     ):
         """Total grand_total across company invoices must sum correctly."""
-        from datetime import date
-
         for rate in (100.0, 200.0):
             payload = _minimal_invoice(test_supplier, test_item)
             payload["items"][0]["rate"] = rate
@@ -363,9 +361,12 @@ class TestDashboardSummary:
             )
         frappe.db.commit()
 
-        today = date.today()
+        # Use frappe.utils.today() — runs in the Frappe/container context so
+        # the date matches the posting_date that ERPNext assigns to new docs,
+        # avoiding off-by-one errors when the container is in a different TZ.
+        today = frappe.utils.getdate(frappe.utils.today())
         start = today.replace(day=1)
-        rows = frappe.db.get_all(
+        rows = tenant_db.get_all(
             "Purchase Invoice",
             filters=[
                 ["company", "=", test_company],
@@ -405,14 +406,15 @@ class TestGetExpenses:
         )
         frappe.db.commit()
 
-        invoices = frappe.db.get_all(
+        invoices = tenant_db.get_all(
             "Purchase Invoice",
             filters=[["company", "=", test_company], ["docstatus", "<", 2]],
             fields=["name", "supplier", "grand_total"],
         )
         assert invoices, "No invoices returned for test company"
 
-        # Verify items are queryable for the inserted invoice
+        # Child rows are scoped by their parent link, not by tenant_id directly
+        # (ERPNext does not propagate tenant_id to child table rows on insert).
         items = frappe.db.get_all(
             "Purchase Invoice Item",
             filters={"parent": doc.name},

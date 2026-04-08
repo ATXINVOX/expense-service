@@ -93,6 +93,14 @@ def frappe_session():
     frappe.set_user("Administrator")
     frappe.flags.in_test = True
 
+    # The central-site image filters every frappe.db query by the current
+    # user's tenant_id.  Set it on Administrator now so all frappe.db calls
+    # within the test session resolve against the correct tenant.
+    frappe.db.sql(
+        "UPDATE `tabUser` SET tenant_id = %s WHERE name = 'Administrator'",
+        (TEST_TENANT_ID,),
+    )
+
     # Ensure expense-service custom columns exist on Purchase Invoice.
     # tenant_id is already present on all tables in the central-site image.
     for col, coltype in (
