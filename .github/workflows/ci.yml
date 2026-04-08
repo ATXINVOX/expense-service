@@ -40,23 +40,17 @@ jobs:
   integration-test:
     needs: test
     runs-on: ubuntu-latest
-    env:
-      # Points the ../frappe-microservice-lib volume mount to the in-workspace
-      # checkout. Local dev leaves MS_LIB_PATH unset → uses the default.
-      MS_LIB_PATH: ./frappe-microservice-lib
     steps:
       - name: Checkout expense-service
         uses: actions/checkout@v4
 
-      - name: Checkout frappe-microservice-lib
-        uses: actions/checkout@v4
-        with:
-          repository: ATXINVOX/frappe-microservice-lib
-          path: frappe-microservice-lib
-          token: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Start integration container
-        run: docker compose -f docker-compose.integration.yml up -d
+        # MS_LIB_PATH is intentionally not set in CI — the lib is installed
+        # directly from git in the pip step below, so the /mnt/lib volume
+        # mount is not needed.  We bind-mount a throwaway empty dir instead.
+        run: |
+          mkdir -p /tmp/ms-lib-placeholder
+          MS_LIB_PATH=/tmp/ms-lib-placeholder docker compose -f docker-compose.integration.yml up -d
 
       - name: Wait for Frappe site
         run: |
@@ -100,7 +94,9 @@ jobs:
       - name: Install frappe-microservice lib and test deps
         run: |
           docker compose -f docker-compose.integration.yml exec -T dev-central-site \
-            /home/frappe/frappe-bench/env/bin/pip install --quiet /mnt/lib pytest pytest-cov
+            /home/frappe/frappe-bench/env/bin/pip install --quiet \
+              "git+https://x-access-token:${{ secrets.GH_PAT }}@github.com/ATXINVOX/frappe-microservice-lib.git" \
+              pytest pytest-cov
 
       - name: Run Python integration tests with coverage
         run: |
