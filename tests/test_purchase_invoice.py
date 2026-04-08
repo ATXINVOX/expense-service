@@ -83,10 +83,13 @@ if "flask" not in sys.modules:
 
 from controllers.purchase_invoice import PurchaseInvoice, _expense_title
 from expense_tracker.api import (
+    create_purchase_invoice,
     delete_purchase_invoice,
     get_dashboard_summary,
+    get_purchase_invoice,
     submit_purchase_invoice,
     _app_db,
+    _project_purchase_invoice_api,
 )
 
 
@@ -748,6 +751,99 @@ def test_submit_purchase_invoice_retries_status_when_not_submitted():
     submit_purchase_invoice("user@example.com")
 
     assert mock_frappe.db.set_value.call_count >= 2
+
+
+# ── slim GET/POST projection (resource API) ─────────────────────────────────
+
+
+def test_project_purchase_invoice_api_coerces_types():
+    doc = MagicMock()
+    doc.as_dict.return_value = {
+        "name": "ACC-PINV-1",
+        "supplier": "aavin",
+        "posting_date": date(2026, 4, 8),
+        "remarks": "Grocery",
+        "items": [
+            {
+                "item_code": "Milk 2L",
+                "item_group": "Groceries",
+                "qty": 3,
+                "rate": 4.5,
+                "amount": 13.5,
+            }
+        ],
+        "status": "Draft",
+        "docstatus": 0,
+        "grand_total": 13.5,
+        "currency": "AUD",
+    }
+    out = _project_purchase_invoice_api(doc)
+    assert out["id"] == "ACC-PINV-1"
+    assert out["posting_date"] == "2026-04-08"
+    assert out["items"][0]["qty"] == 3.0
+    assert out["grand_total"] == 13.5
+
+
+def test_get_purchase_invoice_returns_slim_json():
+    mock_doc = MagicMock()
+    mock_doc.as_dict.return_value = {
+        "name": "ACC-PINV-1",
+        "supplier": "S",
+        "posting_date": "2026-04-08",
+        "remarks": None,
+        "items": [],
+        "status": "Draft",
+        "docstatus": 0,
+        "grand_total": 0.0,
+        "currency": "AUD",
+    }
+    mock_app.tenant_db.get_doc.return_value = mock_doc
+
+    out = get_purchase_invoice("u@x.com", "ACC-PINV-2026-00001")
+
+    assert out["name"] == "ACC-PINV-1"
+    assert out["id"] == "ACC-PINV-1"
+    mock_app.tenant_db.get_doc.assert_called_once_with(
+        "Purchase Invoice", "ACC-PINV-2026-00001"
+    )
+
+
+def test_create_purchase_invoice_returns_201_with_slim_body():
+    sys.modules["flask"].request.json = {
+        "supplier": "aavin",
+        "posting_date": "2026-04-08",
+        "remarks": "Grocery",
+        "items": [{"item_code": "Milk", "item_group": "G", "qty": 1, "rate": 2.0}],
+    }
+    mock_doc = MagicMock()
+    mock_doc.as_dict.return_value = {
+        "name": "ACC-NEW",
+        "supplier": "aavin",
+        "posting_date": "2026-04-08",
+        "remarks": "Grocery",
+        "items": [
+            {
+                "item_code": "Milk",
+                "item_group": "G",
+                "qty": 1.0,
+                "rate": 2.0,
+                "amount": 2.0,
+            }
+        ],
+        "status": "Draft",
+        "docstatus": 0,
+        "grand_total": 2.0,
+        "currency": "AUD",
+    }
+    mock_app.tenant_db.insert_doc.return_value = mock_doc
+
+    out, code = create_purchase_invoice("u@x.com")
+
+    assert code == 201
+    assert out["success"] is True
+    assert out["doctype"] == "Purchase Invoice"
+    assert out["id"] == "ACC-NEW"
+    mock_app.tenant_db.insert_doc.assert_called_once()
 
 
 # ── delete_purchase_invoice (resource DELETE: cancel if submitted, then delete) ─

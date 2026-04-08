@@ -27,7 +27,11 @@ import expense_tracker.api as expense_tracker_api  # noqa: E402 — after app; r
 # Purchase Invoice: custom delete cancels submitted invoices then deletes.
 app.register_resource(
     "Purchase Invoice",
-    custom_handlers={"delete": expense_tracker_api.delete_purchase_invoice},
+    custom_handlers={
+        "get": expense_tracker_api.get_purchase_invoice,
+        "post": expense_tracker_api.create_purchase_invoice,
+        "delete": expense_tracker_api.delete_purchase_invoice,
+    },
 )
 app.register_resource("Item Group")
 app.register_resource("Item")

@@ -312,6 +312,95 @@ def submit_purchase_invoice(user):
         return _build_error("An unexpected error occurred while submitting", 500, "ServerError")
 
 
+def _fmt_api_date(val):
+    if val is None:
+        return None
+    if hasattr(val, "isoformat"):
+        return val.isoformat()
+    return str(val)
+
+
+def _to_api_float(val):
+    if val is None:
+        return None
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return None
+
+
+def _project_purchase_invoice_api(doc):
+    """Slim JSON for mobile: same fields clients send on POST + id and a few totals."""
+    d = doc.as_dict() if hasattr(doc, "as_dict") else dict(doc)
+    items_out = []
+    for row in d.get("items") or []:
+        if not row:
+            continue
+        items_out.append(
+            {
+                "item_code": row.get("item_code"),
+                "item_group": row.get("item_group"),
+                "qty": _to_api_float(row.get("qty")),
+                "rate": _to_api_float(row.get("rate")),
+                "amount": _to_api_float(row.get("amount")),
+            }
+        )
+    name = d.get("name")
+    return {
+        "id": name,
+        "name": name,
+        "supplier": d.get("supplier"),
+        "posting_date": _fmt_api_date(d.get("posting_date")),
+        "remarks": d.get("remarks"),
+        "items": items_out,
+        "status": d.get("status"),
+        "docstatus": d.get("docstatus"),
+        "grand_total": _to_api_float(d.get("grand_total")),
+        "currency": d.get("currency"),
+    }
+
+
+def get_purchase_invoice(user, name):
+    """GET /api/resource/Purchase Invoice/<name> — slim document (not full as_dict)."""
+    import urllib.parse
+
+    name_raw = urllib.parse.unquote(str(name or "")).strip()
+    nm, err = _validate_name(name_raw)
+    if err:
+        return err
+
+    try:
+        doc = _app_db().get_doc("Purchase Invoice", nm)
+        return _project_purchase_invoice_api(doc)
+    except frappe.PermissionError:
+        return {"error": "Access denied"}, 403
+    except frappe.DoesNotExistError:
+        return {"error": "Purchase Invoice not found"}, 404
+
+
+def create_purchase_invoice(user):
+    """POST /api/resource/Purchase Invoice — create and return the same slim shape as GET."""
+    from flask import request
+
+    data = request.json
+    if not data:
+        return {"error": "Request body required"}, 400
+
+    try:
+        doc = _app_db().insert_doc("Purchase Invoice", data)
+        out = _project_purchase_invoice_api(doc)
+        out["success"] = True
+        out["doctype"] = "Purchase Invoice"
+        return out, 201
+    except frappe.PermissionError:
+        return {"error": "Access denied"}, 403
+    except frappe.ValidationError as e:
+        return _build_error(str(e), 400, "ValidationError")
+    except Exception as e:
+        logger.exception("POST Purchase Invoice failed: %s", e)
+        return _build_error(str(e), 400, "ValidationError")
+
+
 def delete_purchase_invoice(user, name):
     """DELETE /api/resource/Purchase Invoice/<name>: cancel if submitted, then delete.
 
