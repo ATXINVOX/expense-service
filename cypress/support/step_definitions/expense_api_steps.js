@@ -224,7 +224,7 @@ Then("the stored invoice should have workflow status {string}", (st) => {
 
 Then("the submit response should show success and status Submitted", () => {
   expect(state.lastResponse.body.success).to.be.true;
-  expect(state.lastResponse.body.status).to.eq("Submitted");
+  expect(state.lastResponse.body.docstatus).to.eq(1);
 });
 
 Then("the delete response should show success", () => {

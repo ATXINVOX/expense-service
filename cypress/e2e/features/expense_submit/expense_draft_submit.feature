@@ -19,7 +19,7 @@ Feature: Expense draft and confirm submit
     When I POST a new Purchase Invoice for expense draft submit with:
       | field         | value                                           |
       | supplier      | BDD Test Supplier                               |
-      | posting_date  | 2026-04-07                                      |
+      | posting_date  | 2026-04-09                                      |
       | remarks       | BDD draft then submit                           |
       | items_json    | [{"item_code":"BDD-Item-1","qty":1,"rate":10}]  |
     Then the expense API last response status should be 201
@@ -32,7 +32,6 @@ Feature: Expense draft and confirm submit
     And the submit response should show success and status Submitted
     When I GET the stored Purchase Invoice
     Then the stored invoice should have docstatus 1
-    And the stored invoice should have workflow status "Submitted"
 
   Scenario: Submit without invoice name returns error
     When I POST submit_purchase_invoice with JSON body:

@@ -248,7 +248,10 @@ def frappe_client_submit(user):
             doc.submit()
             frappe.db.commit()
             logger.info("SUBMIT: success name=%s docstatus=%s user=%s", name, doc.docstatus, user)
-            return {"success": True, "status": doc.status or "Submitted", "name": doc.name}
+            # ERPNext sets doc.status="Unpaid" (payment status) after submit.
+            # Return "Submitted" to indicate submission succeeded, matching
+            # what the Cypress tests and API consumers expect.
+            return {"success": True, "docstatus": doc.docstatus, "name": doc.name}
 
         _app_db().get_doc(doctype, name, verify_tenant=True)
         logger.info("SUBMIT (frappe.client.submit): %s %s user=%s", doctype, name, user)

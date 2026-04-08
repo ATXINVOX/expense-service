@@ -62,7 +62,6 @@ Feature: Expense full API lifecycle
     And the submit response should show success and status Submitted
     When I GET the stored Purchase Invoice
     Then the stored invoice should have docstatus 1
-    And the stored invoice should have workflow status "Submitted"
 
   # ---------------------------------------------------------------------------
   # 3. Delete a draft

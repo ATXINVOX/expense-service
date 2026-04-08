@@ -23,7 +23,6 @@ Function-scoped:
 
 import os
 import sys
-from datetime import date
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -142,38 +141,49 @@ def test_company(frappe_session):
 
 @pytest.fixture(scope="session")
 def ensure_fiscal_year(frappe_session, test_company):
-    """Ensure a Fiscal Year covering today's date exists."""
-    today = date.today()
+    """Ensure a Fiscal Year covering today's date exists and is linked to the test company.
+
+    Uses frappe.utils.today() so the date matches the ERPNext container's clock
+    (which may differ from the host due to timezone offsets), preventing
+    'Date is not in any active Fiscal Year' errors during doc.submit().
+    The test company link is always (re-)created so existing fiscal years from
+    the before_tests bootstrap also cover the test company.
+    """
+    # Use container-side date to match what ERPNext stamps on new documents.
+    today = frappe.utils.getdate(frappe.utils.today())
     existing = frappe.db.sql(
         "SELECT name FROM `tabFiscal Year` "
         "WHERE year_start_date <= %s AND year_end_date >= %s LIMIT 1",
         (today, today), as_dict=True,
     )
+
     if existing:
-        return existing[0]["name"]
+        fy_name = existing[0]["name"]
+    else:
+        fy_start = today.replace(month=7, day=1) if today.month >= 7 \
+                   else today.replace(year=today.year - 1, month=7, day=1)
+        fy_end   = fy_start.replace(year=fy_start.year + 1, month=6, day=30)
+        fy_name  = f"{fy_start.year}-{fy_end.year}"
 
-    fy_start = today.replace(month=7, day=1) if today.month >= 7 \
-               else today.replace(year=today.year - 1, month=7, day=1)
-    fy_end   = fy_start.replace(year=fy_start.year + 1, month=6, day=30)
-    fy_name  = f"{fy_start.year}-{fy_end.year}"
+        if not frappe.db.exists("Fiscal Year", fy_name):
+            fy = frappe.get_doc({
+                "doctype": "Fiscal Year",
+                "year": fy_name,
+                "year_start_date": str(fy_start),
+                "year_end_date":   str(fy_end),
+            })
+            fy.insert(ignore_permissions=True, ignore_mandatory=True)
 
-    if not frappe.db.exists("Fiscal Year", fy_name):
-        fy = frappe.get_doc({
-            "doctype": "Fiscal Year",
-            "year": fy_name,
-            "year_start_date": str(fy_start),
-            "year_end_date":   str(fy_end),
-        })
-        fy.insert(ignore_permissions=True, ignore_mandatory=True)
-        frappe.db.sql(
-            "INSERT IGNORE INTO `tabFiscal Year Company` "
-            "(name, parent, parenttype, parentfield, company, "
-            " creation, modified, modified_by, owner, docstatus, idx) "
-            "VALUES (%s, %s, 'Fiscal Year', 'companies', %s, "
-            " NOW(), NOW(), 'Administrator', 'Administrator', 0, 1)",
-            (f"{fy_name}-{test_company}", fy_name, test_company),
-        )
-        frappe.db.commit()
+    # Always link the test company — the bootstrap fiscal year may not include it.
+    frappe.db.sql(
+        "INSERT IGNORE INTO `tabFiscal Year Company` "
+        "(name, parent, parenttype, parentfield, company, "
+        " creation, modified, modified_by, owner, docstatus, idx) "
+        "VALUES (%s, %s, 'Fiscal Year', 'companies', %s, "
+        " NOW(), NOW(), 'Administrator', 'Administrator', 0, 1)",
+        (f"{fy_name}-{test_company}", fy_name, test_company),
+    )
+    frappe.db.commit()
 
     return fy_name
 
@@ -224,11 +234,33 @@ def test_accounts(frappe_session, test_company):
     expense_root   = _ensure_account(f"Expenses - {abbr}",    "Expenses",    "Expense",   "Profit and Loss",     is_group=1)
 
     # Leaf accounts
-    payable  = _ensure_account(
+    # When ERPNext auto-creates a chart on company insert, "Accounts Payable"
+    # is typically a GROUP account (is_group=1) with "Creditors" as the leaf.
+    # We must resolve to a non-group payable account for doc.submit() to pass
+    # validation ("group accounts cannot be used in transactions").
+    _ensure_account(
         f"Accounts Payable - {abbr}", "Accounts Payable",
         "Liability", "Balance Sheet", account_type="Payable",
         parent=liability_root,
     )
+    payable = frappe.db.get_value(
+        "Account",
+        {"company": test_company, "account_type": "Payable", "is_group": 0},
+        "name",
+    )
+    if not payable:
+        # No leaf payable exists yet — create one under the payable group
+        payable_group = frappe.db.get_value(
+            "Account",
+            {"company": test_company, "account_type": "Payable", "is_group": 1},
+            "name",
+        )
+        payable = _ensure_account(
+            f"Creditors - {abbr}", "Creditors",
+            "Liability", "Balance Sheet", account_type="Payable",
+            parent=payable_group or liability_root,
+        )
+
     expense  = _ensure_account(
         f"General Expenses - {abbr}", "General Expenses",
         "Expense", "Profit and Loss", account_type="Expense Account",
