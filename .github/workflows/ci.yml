@@ -218,10 +218,7 @@ jobs:
           frappe.connect()
           TEST_TENANT_ID = "expense-integ-tenant-001"
           TEST_COMPANY   = "_Test Expense Integ Co"
-          cols = frappe.db.sql("SHOW COLUMNS FROM `tabUser` LIKE 'tenant_id'", as_list=True)
-          if not cols:
-              frappe.db.sql("ALTER TABLE `tabUser` ADD COLUMN `tenant_id` VARCHAR(140) DEFAULT NULL")
-              print("Added tenant_id column to tabUser")
+          # tenant_id already exists on tabUser in the central-site image.
           frappe.db.sql(
               "UPDATE `tabUser` SET tenant_id = %s WHERE name = 'Administrator'",
               (TEST_TENANT_ID,),

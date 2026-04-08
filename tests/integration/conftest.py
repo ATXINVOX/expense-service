@@ -57,6 +57,13 @@ def _discover_site():
 
 
 def _ensure_column(doctype, column, coltype="varchar(140)"):
+    """Add a column to a Frappe table if it does not already exist.
+
+    Used only for expense-service-specific custom fields
+    (expense_item_name, expense_item_group, expense_items_count).
+    The central-site image already carries tenant_id on all standard tables,
+    so tenant_id columns must NOT be added here.
+    """
     try:
         frappe.db.sql(f"ALTER TABLE `tab{doctype}` ADD COLUMN `{column}` {coltype}")
     except Exception:
@@ -86,21 +93,8 @@ def frappe_session():
     frappe.set_user("Administrator")
     frappe.flags.in_test = True
 
-    # Ensure tenant_id column exists on all relevant tables
-    for dt in (
-        "Purchase Invoice",
-        "Purchase Invoice Item",
-        "Purchase Taxes and Charges",
-        "Supplier",
-        "Item",
-        "Item Group",
-        "Cost Center",
-        "Account",
-        "Company",
-    ):
-        _ensure_column(dt, "tenant_id")
-
-    # Ensure expense-service custom columns exist
+    # Ensure expense-service custom columns exist on Purchase Invoice.
+    # tenant_id is already present on all tables in the central-site image.
     for col, coltype in (
         ("expense_item_name",  "varchar(140)"),
         ("expense_item_group", "varchar(140)"),

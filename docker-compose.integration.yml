@@ -1,6 +1,6 @@
 services:
   dev-central-site:
-    image: docker.io/vyogo/erpnext:sne-version-16
+    image: ghcr.io/atxinvox/central-site:sne-latest
     ports:
       - "8080:8000"   # ERPNext / Frappe web server
       - "9004:9004"   # expense-service (started by run script)
