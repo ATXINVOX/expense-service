@@ -89,15 +89,86 @@ Example create payloads:
 - Item Group creation follows standard Frappe Resource API behavior (POST on `/api/resource/Item Group`).
 
 ## Tests
-### TDD (pytest)
-- `tests/test_purchase_invoice.py` — enrichment, custom fields, `get_dashboard_summary`, **`submit_purchase_invoice`**, **`delete_purchase_invoice`** (cancel-if-submitted then delete)
-- `tests/test_server.py` — registered resources
+
+### Unit tests (pytest)
+
+| File | What it covers |
+|------|---------------|
+| `tests/test_purchase_invoice.py` | Controller enrichment, custom fields, dashboard summary, submit, delete |
+| `tests/test_server.py` | Registered resources |
+| `tests/test_document_model.py` | Document-model correctness — proves child rows are `FakeChildDocument` instances, not plain dicts, and that `save()` crashes when they are |
 
 ```bash
+# Run all unit tests (integration tests excluded automatically)
 cd expense-service && PYTHONPATH=. pytest tests/
 ```
 
+#### Document-model tests — why they exist
+
+`MagicMock` accepts anything silently. In production, Frappe's `_set_defaults()` calls `is_new()` on every child table row during `save()`. If a row is a plain Python `dict` (as `setattr`-based code produces), this crashes with:
+
+```
+AttributeError: 'dict' object has no attribute 'is_new'
+```
+
+`tests/conftest.py` provides two test doubles that reproduce this:
+
+- **`FakeChildDocument`** — has `is_new()`, supports both attribute and dict-style access (`row.item_code` / `row["item_code"]`)
+- **`FakeDocumentController`** — converts child table dicts to `FakeChildDocument` on `append()`/`set()`, and its `save()` calls `_set_defaults()` → `is_new()` on every row, crashing on plain dicts
+
+### Integration tests (pytest + live ERPNext)
+
+Integration tests run against a real Frappe/ERPNext/MariaDB/Redis instance inside the `vyogo/erpnext:sne-version-16` all-in-one container — no mocks.
+
+**Prerequisites:** Docker (or Podman) and the `frappe-microservice-lib` repo checked out as a sibling directory (`../frappe-microservice-lib`).
+
+```
+git/
+├── expense-service/          ← this repo
+└── frappe-microservice-lib/  ← sibling (used to install frappe-microservice inside container)
+```
+
+```bash
+# Full cycle: start container → wait → bootstrap → install → test → teardown
+./scripts/run_integration_tests.sh
+
+# Keep the container running after tests (useful for debugging)
+KEEP_RUNNING=1 ./scripts/run_integration_tests.sh
+```
+
+#### What the integration tests cover
+
+| Test class | Scenarios |
+|-----------|-----------|
+| `TestPurchaseInvoiceCreate` | Controller sets `expense_account` and `cost_center` on items; populates `expense_item_name`, `expense_item_group`, `expense_items_count`; child rows are Document instances (not dicts); auto-creates missing supplier; auto-creates missing item; multiple items all enriched |
+| `TestPurchaseInvoiceSubmit` | Draft → Submitted via `submit_purchase_invoice()`; rejects already-submitted invoice |
+| `TestPurchaseInvoiceDelete` | Draft delete removes document; submitted invoice is cancelled first then deleted |
+| `TestDashboardSummary` | Aggregates `grand_total` across invoices for the resolved company |
+| `TestGetExpenses` | Returns paginated list with embedded item rows |
+
+#### Infrastructure
+
+| File | Purpose |
+|------|---------|
+| `docker-compose.integration.yml` | Single `vyogo/erpnext:sne-version-16` service; mounts `.:/mnt/expense` and `../frappe-microservice-lib:/mnt/lib` |
+| `scripts/run_integration_tests.sh` | Orchestration: start → wait for site → bootstrap ERPNext data → install lib + pytest → run tests → teardown |
+| `tests/integration/conftest.py` | Frappe session boot, company/accounts/fiscal year/supplier/item fixtures, `tenant_db`, `mock_app`, rollback |
+| `tests/integration/pytest.ini` | Pytest config for integration run (verbosity, timeout, markers) |
+
+### CI/CD pipeline
+
+```
+test (unit + coverage) → integration-test (container + coverage) → build (image)
+```
+
+| Job | What it does |
+|-----|-------------|
+| **test** | Runs unit tests with `--cov` inside `ghcr.io/atxinvox/frappe-microservice-lib:latest` |
+| **integration-test** | Checks out sibling `frappe-microservice-lib` repo, starts ERPNext container, installs lib, runs `tests/integration/` with `--cov` |
+| **build** | Builds and pushes the container image to GHCR — only after both test jobs pass |
+
 ### BDD (Cypress + Cucumber)
+
 - `cypress/e2e/features/expense_submit/expense_draft_submit.feature` — end-to-end draft create, GET docstatus, POST submit, GET submitted (requires running API + `EXPENSE_TEST_SID`)
 - `cypress/e2e/features/expense_custom_fields/expense_custom_fields.feature` — spec / future steps for custom-field behaviour
 
