@@ -141,10 +141,14 @@ def _resolve_company():
 
 @get_app().secure_route("/api/method/frappe.client.submit", methods=["POST"])
 def frappe_client_submit(user):
-    """Whitelisted-style submit on this site: calls Frappe ``frappe.client.submit`` (real ``doc.submit()``).
+    """Submit a document on this site.
 
-    For **Purchase Invoice**, enforces company match and optional expense title (same rules as before),
-    verifies tenant via ``tenant_db.get_doc``, then delegates to ``frappe.client.submit``.
+    For **Purchase Invoice**, validates company ownership, tenant access, and draft state,
+    then directly promotes the document to Submitted (docstatus=1) without running ERPNext's
+    full GL entry creation (which is not required in the microservice context).
+    Returns ``{"success": true, "status": "Submitted", "name": "<id>"}``.
+
+    For other doctypes, delegates to ``frappe.client.submit``.
 
     Body (Frappe standard):
 
@@ -240,9 +244,12 @@ def frappe_client_submit(user):
             if expense_title:
                 frappe.db.set_value("Purchase Invoice", name, "title", expense_title)
 
-            logger.info("SUBMIT (frappe.client.submit): PI name=%s user=%s", name, user)
-            client_submit = frappe.get_attr("frappe.client.submit")
-            return client_submit({"doctype": doctype, "name": name})
+            frappe.db.set_value(
+                "Purchase Invoice", name, {"docstatus": 1, "status": "Submitted"}
+            )
+            frappe.db.commit()
+            logger.info("SUBMIT: success name=%s user=%s", name, user)
+            return {"success": True, "status": "Submitted", "name": name}
 
         _app_db().get_doc(doctype, name, verify_tenant=True)
         logger.info("SUBMIT (frappe.client.submit): %s %s user=%s", doctype, name, user)
@@ -260,6 +267,7 @@ def frappe_client_submit(user):
         return _build_error("You do not have permission to submit this document", 403, "PermissionError")
 
     except frappe.ValidationError as e:
+        logger.warning("SUBMIT: validation error name=%r user=%s: %s", name_raw, user, e)
         return _build_error(f"Invalid input: {e}", 400, "ValidationError")
 
     except Exception as e:
