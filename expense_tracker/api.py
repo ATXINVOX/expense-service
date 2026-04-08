@@ -330,7 +330,7 @@ def _to_api_float(val):
 
 
 def _project_purchase_invoice_api(doc):
-    """Slim JSON for mobile: same fields clients send on POST + id and a few totals."""
+    """Slim JSON for mobile: same fields clients send on POST + id and a few total."""
     d = doc.as_dict() if hasattr(doc, "as_dict") else dict(doc)
     items_out = []
     for row in d.get("items") or []:
