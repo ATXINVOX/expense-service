@@ -72,7 +72,7 @@ Example create payloads:
 ### Custom API
 - `GET /api/method/expense_tracker.api.get_dashboard_summary`
 - `POST /api/method/expense_tracker.api.submit_purchase_invoice` — body `{"name":"<Purchase Invoice name>"}` (draft → submitted)
-- `POST /api/method/expense_tracker.api.cancel_purchase_invoice` — body `{"name":"<Purchase Invoice name>"}` (submitted → cancelled, docstatus 2)
+- `DELETE /api/resource/Purchase Invoice/{name}` — removes the expense; if still **Submitted**, the service cancels it first (docstatus 2) then deletes (no separate cancel endpoint).
 
 ## Kong
 `manifests/kong/kong-configmap.yaml` exposes:
@@ -90,7 +90,7 @@ Example create payloads:
 
 ## Tests
 ### TDD (pytest)
-- `tests/test_purchase_invoice.py` — enrichment, custom fields, `get_dashboard_summary`, **`submit_purchase_invoice`** (draft → submit validation and DB updates)
+- `tests/test_purchase_invoice.py` — enrichment, custom fields, `get_dashboard_summary`, **`submit_purchase_invoice`**, **`delete_purchase_invoice`** (cancel-if-submitted then delete)
 - `tests/test_server.py` — registered resources
 
 ```bash

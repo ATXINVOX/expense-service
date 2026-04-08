@@ -83,7 +83,7 @@ if "flask" not in sys.modules:
 
 from controllers.purchase_invoice import PurchaseInvoice, _expense_title
 from expense_tracker.api import (
-    cancel_purchase_invoice,
+    delete_purchase_invoice,
     get_dashboard_summary,
     submit_purchase_invoice,
     _app_db,
@@ -739,11 +739,10 @@ def test_submit_purchase_invoice_retries_status_when_not_submitted():
     assert mock_frappe.db.set_value.call_count >= 2
 
 
-# ── cancel_purchase_invoice (submitted → cancelled) ────────────────────────────
+# ── delete_purchase_invoice (resource DELETE: cancel if submitted, then delete) ─
 
 
-def test_cancel_purchase_invoice_success():
-    sys.modules["flask"].request.get_json.return_value = {"name": "ACC-PINV-2026-00001"}
+def test_delete_purchase_invoice_submitted_cancels_then_deletes():
     mock_frappe.defaults = MagicMock()
     mock_frappe.defaults.get_user_default.return_value = "Acme Pty Ltd"
 
@@ -754,23 +753,24 @@ def test_cancel_purchase_invoice_success():
 
     mock_frappe.db.get_value.side_effect = _gv
 
-    result = cancel_purchase_invoice("user@example.com")
+    result = delete_purchase_invoice("user@example.com", "ACC-PINV-2026-00001")
 
     assert result == {
         "success": True,
-        "name": "ACC-PINV-2026-00001",
-        "docstatus": 2,
-        "status": "Cancelled",
+        "doctype": "Purchase Invoice",
+        "message": "Purchase Invoice deleted",
     }
     mock_frappe.db.set_value.assert_called_with(
         "Purchase Invoice",
         "ACC-PINV-2026-00001",
         {"docstatus": 2, "status": "Cancelled"},
     )
+    mock_app.tenant_db.delete_doc.assert_called_once_with(
+        "Purchase Invoice", "ACC-PINV-2026-00001"
+    )
 
 
-def test_cancel_purchase_invoice_rejects_draft():
-    sys.modules["flask"].request.get_json.return_value = {"name": "PI-1"}
+def test_delete_purchase_invoice_draft_deletes_without_cancel():
     mock_frappe.defaults = MagicMock()
     mock_frappe.defaults.get_user_default.return_value = "Acme Pty Ltd"
 
@@ -781,7 +781,10 @@ def test_cancel_purchase_invoice_rejects_draft():
 
     mock_frappe.db.get_value.side_effect = _gv
 
-    with pytest.raises(mock_frappe.ValidationError, match="Only submitted"):
-        cancel_purchase_invoice("user@example.com")
+    result = delete_purchase_invoice("user@example.com", "PI-1")
+
+    assert result["success"] is True
+    mock_frappe.db.set_value.assert_not_called()
+    mock_app.tenant_db.delete_doc.assert_called_once_with("Purchase Invoice", "PI-1")
 
 

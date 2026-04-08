@@ -1,10 +1,52 @@
 from __future__ import annotations
 
+import logging
+import re
 from datetime import date, datetime
 import frappe
 from frappe_microservice import get_app
 
 from controllers.purchase_invoice import _expense_title
+
+logger = logging.getLogger(__name__)
+
+_MAX_NAME_LENGTH = 140
+_VALID_NAME_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9\-_. ]{0,139}$')
+
+
+def _build_error(message, code, error_type=None):
+    """Build a consistent error response."""
+    resp = {"status": "error", "code": code, "message": message}
+    if error_type:
+        resp["type"] = error_type
+    return resp, code
+
+
+def _validate_name(name_raw):
+    """Validate and sanitize invoice name. Returns (name, error_response)."""
+    import urllib.parse
+    if not name_raw:
+        return None, _build_error(
+            "name or invoice_name is required in JSON body",
+            400, "ValidationError"
+        )
+    name = urllib.parse.unquote(str(name_raw)).strip()
+    if not name:
+        return None, _build_error(
+            "Invoice name cannot be empty",
+            400, "ValidationError"
+        )
+    if len(name) > _MAX_NAME_LENGTH:
+        return None, _build_error(
+            f"Invoice name too long (max {_MAX_NAME_LENGTH} characters)",
+            400, "ValidationError"
+        )
+    if not _VALID_NAME_RE.match(name):
+        return None, _build_error(
+            "Invalid invoice name format",
+            400, "ValidationError"
+        )
+    return name, None
 
 
 def _safe_date(value, default_factory):
@@ -173,121 +215,176 @@ def submit_purchase_invoice(user):
     """Confirm a draft expense: set docstatus 1 and status Submitted (direct DB update)."""
     from flask import request
 
-    payload = request.get_json(silent=True) or {}
-    name = (payload.get("name") or payload.get("invoice_name") or "").strip()
-    if not name:
-        frappe.throw(
-            "name or invoice_name is required in JSON body",
-            frappe.ValidationError,
+    try:
+        payload = request.get_json(silent=True) or {}
+
+        # 1. Validate name
+        name_raw = (payload.get("name") or payload.get("invoice_name") or "").strip()
+        name, err = _validate_name(name_raw)
+        if err:
+            return err
+
+        # 2. Resolve company
+        company = _resolve_company()
+        if not company:
+            return _build_error(
+                "Company is required. No company found for the current user.",
+                400, "ValidationError"
+            )
+
+        # 3. Fetch invoice
+        row = frappe.db.get_value(
+            "Purchase Invoice",
+            name,
+            [
+                "docstatus",
+                "company",
+                "expense_item_name",
+                "expense_items_count",
+                "remarks",
+            ],
+            as_dict=True,
         )
+        if not row:
+            logger.info("SUBMIT: not found name=%r user=%s", name, user)
+            return _build_error(
+                f"Purchase Invoice '{name}' not found",
+                404, "DoesNotExistError"
+            )
 
-    company = _resolve_company()
-    if not company:
-        frappe.throw("Company is required", frappe.ValidationError)
+        # 4. Company ownership check
+        inv_company = (row.get("company") or "").strip()
+        if inv_company and inv_company != company:
+            logger.warning("SUBMIT: permission denied name=%r user=%s company=%s", name, user, company)
+            return _build_error(
+                "You do not have access to this expense",
+                403, "PermissionError"
+            )
 
-    row = frappe.db.get_value(
-        "Purchase Invoice",
-        name,
-        [
-            "docstatus",
-            "company",
-            "expense_item_name",
-            "expense_items_count",
-            "remarks",
-        ],
-        as_dict=True,
-    )
-    if not row:
-        frappe.throw(f"Purchase Invoice {name!r} not found", frappe.DoesNotExistError)
+        # 5. Docstatus check — only drafts (0) can be submitted
+        docstatus = int(row.get("docstatus") or 0)
+        if docstatus != 0:
+            status_label = "Submitted" if docstatus == 1 else "Cancelled"
+            return _build_error(
+                f"Only draft expenses (docstatus 0) can be submitted. "
+                f"This invoice is {status_label} (docstatus={docstatus}).",
+                400, "ValidationError"
+            )
 
-    inv_company = (row.get("company") or "").strip()
-    if inv_company and inv_company != company:
-        frappe.throw("You do not have access to this expense", frappe.PermissionError)
-
-    if int(row.get("docstatus") or 0) != 0:
-        frappe.throw(
-            "Only draft expenses (docstatus 0) can be submitted; "
-            f"this document is already docstatus {row.get('docstatus')}",
-            frappe.ValidationError,
+        # 6. Submit
+        expense_title = _expense_title(
+            row.get("expense_item_name"),
+            int(row.get("expense_items_count") or 0),
+            row.get("remarks"),
         )
+        updates: dict = {"docstatus": 1, "status": "Submitted"}
+        if expense_title:
+            updates["title"] = expense_title
 
-    expense_title = _expense_title(
-        row.get("expense_item_name"),
-        int(row.get("expense_items_count") or 0),
-        row.get("remarks"),
-    )
-    updates: dict = {"docstatus": 1, "status": "Submitted"}
-    if expense_title:
-        updates["title"] = expense_title
-
-    frappe.db.set_value("Purchase Invoice", name, updates)
-    frappe.db.commit()
-
-    saved_status = frappe.db.get_value("Purchase Invoice", name, "status")
-    if saved_status != "Submitted":
-        frappe.db.set_value("Purchase Invoice", name, "status", "Submitted")
+        frappe.db.set_value("Purchase Invoice", name, updates)
         frappe.db.commit()
 
-    return {
-        "success": True,
-        "name": name,
-        "docstatus": 1,
-        "status": "Submitted",
-    }
+        saved_status = frappe.db.get_value("Purchase Invoice", name, "status")
+        if saved_status != "Submitted":
+            frappe.db.set_value("Purchase Invoice", name, "status", "Submitted")
+            frappe.db.commit()
+
+        logger.info("SUBMIT: success name=%s user=%s", name, user)
+
+        return {
+            "success": True,
+            "name": name,
+            "docstatus": 1,
+            "status": "Submitted",
+        }
+
+    except frappe.DoesNotExistError:
+        return _build_error(f"Purchase Invoice '{name}' not found", 404, "DoesNotExistError")
+
+    except frappe.PermissionError:
+        return _build_error("You do not have permission to submit this invoice", 403, "PermissionError")
+
+    except frappe.ValidationError as e:
+        return _build_error(f"Invalid input: {e}", 400, "ValidationError")
+
+    except Exception as e:
+        logger.exception("SUBMIT: unexpected error name=%r user=%s", name_raw, user)
+        return _build_error("An unexpected error occurred while submitting", 500, "ServerError")
 
 
-@get_app().secure_route(
-    "/api/method/expense_tracker.api.cancel_purchase_invoice", methods=["POST"]
-)
-def cancel_purchase_invoice(user):
-    """Cancel a submitted expense: set docstatus 2 and status Cancelled (direct DB update)."""
-    from flask import request
+def delete_purchase_invoice(user, name):
+    """DELETE /api/resource/Purchase Invoice/<name>: cancel if submitted, then delete.
 
-    payload = request.get_json(silent=True) or {}
-    name = (payload.get("name") or payload.get("invoice_name") or "").strip()
-    if not name:
-        frappe.throw(
-            "name or invoice_name is required in JSON body",
-            frappe.ValidationError,
+    Draft (0) and cancelled (2) invoices are deleted directly. Submitted (1) are
+    moved to cancelled via DB update first, then removed.
+    """
+    import urllib.parse
+
+    name_raw = urllib.parse.unquote(str(name or "")).strip()
+    name, err = _validate_name(name_raw)
+    if err:
+        return err
+
+    try:
+        company = _resolve_company()
+        if not company:
+            return _build_error(
+                "Company is required. No company found for the current user.",
+                400, "ValidationError"
+            )
+
+        row = frappe.db.get_value(
+            "Purchase Invoice",
+            name,
+            ["docstatus", "company"],
+            as_dict=True,
         )
+        if not row:
+            logger.info("DELETE_PI: not found name=%r user=%s", name, user)
+            return _build_error(
+                f"Purchase Invoice '{name}' not found",
+                404, "DoesNotExistError"
+            )
 
-    company = _resolve_company()
-    if not company:
-        frappe.throw("Company is required", frappe.ValidationError)
+        inv_company = (row.get("company") or "").strip()
+        if inv_company and inv_company != company:
+            logger.warning(
+                "DELETE_PI: permission denied name=%r user=%s company=%s",
+                name, user, company,
+            )
+            return _build_error(
+                "You do not have access to this expense",
+                403, "PermissionError"
+            )
 
-    row = frappe.db.get_value(
-        "Purchase Invoice",
-        name,
-        ["docstatus", "company"],
-        as_dict=True,
-    )
-    if not row:
-        frappe.throw(f"Purchase Invoice {name!r} not found", frappe.DoesNotExistError)
+        docstatus = int(row.get("docstatus") or 0)
+        if docstatus == 1:
+            frappe.db.set_value(
+                "Purchase Invoice",
+                name,
+                {"docstatus": 2, "status": "Cancelled"},
+            )
+            frappe.db.commit()
+            logger.info("DELETE_PI: cancelled before delete name=%s user=%s", name, user)
+        elif docstatus not in (0, 2):
+            return _build_error(
+                f"Unexpected docstatus={docstatus} for Purchase Invoice {name}.",
+                400, "ValidationError"
+            )
 
-    inv_company = (row.get("company") or "").strip()
-    if inv_company and inv_company != company:
-        frappe.throw("You do not have access to this expense", frappe.PermissionError)
+        get_app().tenant_db.delete_doc("Purchase Invoice", name)
+        logger.info("DELETE_PI: success name=%s user=%s", name, user)
 
-    if int(row.get("docstatus") or 0) != 1:
-        frappe.throw(
-            "Only submitted expenses (docstatus 1) can be cancelled; "
-            f"this document is docstatus {row.get('docstatus')}",
-            frappe.ValidationError,
-        )
+        return {
+            "success": True,
+            "doctype": "Purchase Invoice",
+            "message": "Purchase Invoice deleted",
+        }
 
-    frappe.db.set_value(
-        "Purchase Invoice",
-        name,
-        {"docstatus": 2, "status": "Cancelled"},
-    )
-    frappe.db.commit()
-
-    return {
-        "success": True,
-        "name": name,
-        "docstatus": 2,
-        "status": "Cancelled",
-    }
+    except frappe.PermissionError:
+        return {"error": "Access denied"}, 403
+    except frappe.DoesNotExistError:
+        return {"error": "Purchase Invoice not found"}, 404
 
 
 @get_app().secure_route('/api/method/expense_tracker.api.get_dashboard_summary', methods=['GET'])
