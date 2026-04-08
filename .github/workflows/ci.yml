@@ -44,20 +44,23 @@ jobs:
       - name: Checkout expense-service
         uses: actions/checkout@v4
 
-      - name: Checkout frappe-microservice-lib
-        uses: actions/checkout@v4
-        with:
-          repository: ATXINVOX/frappe-microservice-lib
-          # Uses GITHUB_TOKEN — works once org Actions settings grant this
-          # workflow read access to all org repos (Org Settings → Actions →
-          # General → Workflow permissions → Repository access → All repositories).
-          token: ${{ github.token }}
-          path: frappe-microservice-lib
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Extract frappe-microservice wheel from published image
+        run: |
+          mkdir -p /tmp/ms-wheel
+          # Pull the same image the test job uses — GITHUB_TOKEN can read
+          # packages in the same org without any extra permissions.
+          docker run --rm --entrypoint "" \
+            -v /tmp/ms-wheel:/out \
+            ghcr.io/atxinvox/frappe-microservice-lib:latest \
+            pip wheel /opt/venv/lib/python3.14/site-packages/frappe_microservice \
+              --no-deps -w /out
 
       - name: Start integration container
-        # frappe-microservice-lib is checked out inside the workspace so the
-        # MS_LIB_PATH volume bind resolves correctly on the runner.
-        run: MS_LIB_PATH=./frappe-microservice-lib docker compose -f docker-compose.integration.yml up -d
+        # No lib volume mount needed — wheel is installed in the pip step below.
+        run: MS_LIB_PATH=/tmp/ms-wheel docker compose -f docker-compose.integration.yml up -d
 
       - name: Wait for Frappe site
         run: |
@@ -100,8 +103,12 @@ jobs:
 
       - name: Install frappe-microservice lib and test deps
         run: |
+          # Copy the wheel built from the published image into the container, then install.
+          docker compose -f docker-compose.integration.yml cp \
+            /tmp/ms-wheel/. dev-central-site:/tmp/ms-wheel/
           docker compose -f docker-compose.integration.yml exec -T dev-central-site \
-            /home/frappe/frappe-bench/env/bin/pip install --quiet /mnt/lib pytest pytest-cov
+            /home/frappe/frappe-bench/env/bin/pip install --quiet \
+              /tmp/ms-wheel/*.whl pytest pytest-cov
 
       - name: Run Python integration tests with coverage
         run: |
