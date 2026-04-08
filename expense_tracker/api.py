@@ -139,101 +139,125 @@ def _resolve_company():
     ) or None
 
 
-@get_app().secure_route(
-    "/api/method/expense_tracker.api.submit_purchase_invoice", methods=["POST"]
-)
-def submit_purchase_invoice(user):
-    """Confirm a draft expense: set docstatus 1 and status Submitted (direct DB update)."""
+@get_app().secure_route("/api/method/frappe.client.submit", methods=["POST"])
+def frappe_client_submit(user):
+    """Whitelisted-style submit on this site: calls Frappe ``frappe.client.submit`` (real ``doc.submit()``).
+
+    For **Purchase Invoice**, enforces company match and optional expense title (same rules as before),
+    verifies tenant via ``tenant_db.get_doc``, then delegates to ``frappe.client.submit``.
+
+    Body (Frappe standard):
+
+    - ``{"doc": {"doctype": "Purchase Invoice", "name": "<id>"}}`` — ``doc`` may be a JSON string.
+    - Shorthand for PI only: ``{"name": "<id>"}`` or ``{"invoice_name": "<id>"}``.
+    """
+    import json
     from flask import request
 
+    name_raw = ""
     try:
         payload = request.get_json(silent=True) or {}
-
-        # 1. Validate name
-        name_raw = (payload.get("name") or payload.get("invoice_name") or "").strip()
-        name, err = _validate_name(name_raw)
-        if err:
-            return err
-
-        # 2. Resolve company
-        company = _resolve_company()
-        if not company:
+        doc_arg = payload.get("doc")
+        if isinstance(doc_arg, str):
+            doc_arg = json.loads(doc_arg)
+        if not isinstance(doc_arg, dict) or not doc_arg.get("doctype") or not doc_arg.get("name"):
+            name_raw = (payload.get("name") or payload.get("invoice_name") or "").strip()
+            if name_raw:
+                doc_arg = {"doctype": "Purchase Invoice", "name": name_raw}
+        if not isinstance(doc_arg, dict) or not doc_arg.get("doctype") or not doc_arg.get("name"):
             return _build_error(
-                "Company is required. No company found for the current user.",
-                400, "ValidationError"
+                "Request must include `doc` with `doctype` and `name`, or `name` / `invoice_name` "
+                "for Purchase Invoice.",
+                400,
+                "ValidationError",
             )
 
-        # 3. Fetch invoice
-        row = frappe.db.get_value(
-            "Purchase Invoice",
-            name,
-            [
-                "docstatus",
-                "company",
-                "expense_item_name",
-                "expense_items_count",
-                "remarks",
-            ],
-            as_dict=True,
-        )
-        if not row:
-            logger.info("SUBMIT: not found name=%r user=%s", name, user)
-            return _build_error(
-                f"Purchase Invoice '{name}' not found",
-                404, "DoesNotExistError"
+        doctype = doc_arg["doctype"]
+        name = str(doc_arg["name"]).strip()
+        name_raw = name
+
+        if doctype == "Purchase Invoice":
+            name, err = _validate_name(name)
+            if err:
+                return err
+
+            company = _resolve_company()
+            if not company:
+                return _build_error(
+                    "Company is required. No company found for the current user.",
+                    400,
+                    "ValidationError",
+                )
+
+            row = frappe.db.get_value(
+                "Purchase Invoice",
+                name,
+                [
+                    "docstatus",
+                    "company",
+                    "expense_item_name",
+                    "expense_items_count",
+                    "remarks",
+                ],
+                as_dict=True,
             )
+            if not row:
+                logger.info("SUBMIT: not found name=%r user=%s", name, user)
+                return _build_error(
+                    f"Purchase Invoice '{name}' not found",
+                    404,
+                    "DoesNotExistError",
+                )
 
-        # 4. Company ownership check
-        inv_company = (row.get("company") or "").strip()
-        if inv_company and inv_company != company:
-            logger.warning("SUBMIT: permission denied name=%r user=%s company=%s", name, user, company)
-            return _build_error(
-                "You do not have access to this expense",
-                403, "PermissionError"
+            inv_company = (row.get("company") or "").strip()
+            if inv_company and inv_company != company:
+                logger.warning(
+                    "SUBMIT: permission denied name=%r user=%s company=%s", name, user, company
+                )
+                return _build_error(
+                    "You do not have access to this expense",
+                    403,
+                    "PermissionError",
+                )
+
+            docstatus = int(row.get("docstatus") or 0)
+            if docstatus != 0:
+                status_label = "Submitted" if docstatus == 1 else "Cancelled"
+                return _build_error(
+                    f"Only draft expenses (docstatus 0) can be submitted. "
+                    f"This invoice is {status_label} (docstatus={docstatus}).",
+                    400,
+                    "ValidationError",
+                )
+
+            _app_db().get_doc("Purchase Invoice", name, verify_tenant=True)
+
+            expense_title = _expense_title(
+                row.get("expense_item_name"),
+                int(row.get("expense_items_count") or 0),
+                row.get("remarks"),
             )
+            if expense_title:
+                frappe.db.set_value("Purchase Invoice", name, "title", expense_title)
 
-        # 5. Docstatus check — only drafts (0) can be submitted
-        docstatus = int(row.get("docstatus") or 0)
-        if docstatus != 0:
-            status_label = "Submitted" if docstatus == 1 else "Cancelled"
-            return _build_error(
-                f"Only draft expenses (docstatus 0) can be submitted. "
-                f"This invoice is {status_label} (docstatus={docstatus}).",
-                400, "ValidationError"
-            )
+            logger.info("SUBMIT (frappe.client.submit): PI name=%s user=%s", name, user)
+            client_submit = frappe.get_attr("frappe.client.submit")
+            return client_submit({"doctype": doctype, "name": name})
 
-        # 6. Submit
-        expense_title = _expense_title(
-            row.get("expense_item_name"),
-            int(row.get("expense_items_count") or 0),
-            row.get("remarks"),
-        )
-        updates: dict = {"docstatus": 1, "status": "Submitted"}
-        if expense_title:
-            updates["title"] = expense_title
-
-        frappe.db.set_value("Purchase Invoice", name, updates)
-        frappe.db.commit()
-
-        saved_status = frappe.db.get_value("Purchase Invoice", name, "status")
-        if saved_status != "Submitted":
-            frappe.db.set_value("Purchase Invoice", name, "status", "Submitted")
-            frappe.db.commit()
-
-        logger.info("SUBMIT: success name=%s user=%s", name, user)
-
-        return {
-            "success": True,
-            "name": name,
-            "docstatus": 1,
-            "status": "Submitted",
-        }
+        _app_db().get_doc(doctype, name, verify_tenant=True)
+        logger.info("SUBMIT (frappe.client.submit): %s %s user=%s", doctype, name, user)
+        client_submit = frappe.get_attr("frappe.client.submit")
+        return client_submit({"doctype": doctype, "name": name})
 
     except frappe.DoesNotExistError:
-        return _build_error(f"Purchase Invoice '{name}' not found", 404, "DoesNotExistError")
+        return _build_error(
+            f"Document '{name_raw}' not found" if name_raw else "Document not found",
+            404,
+            "DoesNotExistError",
+        )
 
     except frappe.PermissionError:
-        return _build_error("You do not have permission to submit this invoice", 403, "PermissionError")
+        return _build_error("You do not have permission to submit this document", 403, "PermissionError")
 
     except frappe.ValidationError as e:
         return _build_error(f"Invalid input: {e}", 400, "ValidationError")

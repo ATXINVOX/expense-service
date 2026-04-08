@@ -1,7 +1,7 @@
 from datetime import date
 from pathlib import Path
 from types import ModuleType
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 import pytest
 import sys
 
@@ -35,6 +35,19 @@ class MockDocumentController:
 mock_frappe = MagicMock()
 mock_frappe.whitelist = lambda *args, **kwargs: (lambda fn: fn)
 
+stub_frappe_client_submit = MagicMock(
+    return_value={"name": "stub-name", "docstatus": 1, "status": "Submitted"}
+)
+
+
+def _frappe_get_attr_side_effect(path):
+    if path == "frappe.client.submit":
+        return stub_frappe_client_submit
+    return MagicMock()
+
+
+mock_frappe.get_attr.side_effect = _frappe_get_attr_side_effect
+
 mock_app = MagicMock()
 mock_app.db = MagicMock()
 mock_app.db.exists.return_value = False
@@ -60,7 +73,7 @@ sys.modules["frappe_microservice.controller"] = mock_microservice_controller
 
 
 def _configure_frappe_throw():
-    """Make frappe.throw raise so submit_purchase_invoice errors are testable."""
+    """Make frappe.throw raise so frappe_client_submit errors are testable."""
     mock_frappe.ValidationError = type("ValidationError", (Exception,), {})
     mock_frappe.DoesNotExistError = type("DoesNotExistError", (Exception,), {})
     mock_frappe.PermissionError = type("PermissionError", (Exception,), {})
@@ -75,7 +88,7 @@ def _configure_frappe_throw():
 
 _configure_frappe_throw()
 
-# submit_purchase_invoice imports flask.request at runtime; provide a stub so tests run without Flask installed.
+# frappe_client_submit imports flask.request at runtime; provide a stub so tests run without Flask installed.
 if "flask" not in sys.modules:
     _flask_stub = ModuleType("flask")
     _flask_stub.request = MagicMock()
@@ -85,9 +98,9 @@ from controllers.purchase_invoice import PurchaseInvoice, _expense_title
 from expense_tracker.api import (
     create_purchase_invoice,
     delete_purchase_invoice,
+    frappe_client_submit,
     get_dashboard_summary,
     get_purchase_invoice,
-    submit_purchase_invoice,
     _app_db,
     _project_purchase_invoice_api,
 )
@@ -107,6 +120,13 @@ def reset_mocks():
     mock_app.tenant_db.get_all.side_effect = lambda *args, **kwargs: mock_frappe.get_all(*args, **kwargs)
     if "flask" in sys.modules and hasattr(sys.modules["flask"], "request"):
         sys.modules["flask"].request.reset_mock()
+    stub_frappe_client_submit.reset_mock()
+    stub_frappe_client_submit.return_value = {
+        "name": "stub-name",
+        "docstatus": 1,
+        "status": "Submitted",
+    }
+    mock_frappe.get_attr.side_effect = _frappe_get_attr_side_effect
 
 
 def _default_get_value(doctype, filters, field=None):
@@ -602,101 +622,123 @@ def test_custom_fields_queryable_via_resource_api_fields():
     assert resource_fields["expense_items_count"] == 1
 
 
-# ── submit_purchase_invoice (draft → confirm → submitted) ────────────────────
+# ── frappe.client.submit wrapper (Purchase Invoice + tenant checks) ───────────
 
 
-def test_submit_purchase_invoice_success():
+def test_frappe_client_submit_purchase_invoice_success():
     sys.modules["flask"].request.get_json.return_value = {"name": "ACC-PINV-2026-00001"}
     mock_frappe.defaults = MagicMock()
     mock_frappe.defaults.get_user_default.return_value = "Acme Pty Ltd"
-    mock_frappe.db.get_value.side_effect = [
-        {
-            "docstatus": 0,
-            "company": "Acme Pty Ltd",
-            "expense_item_name": "Fuel",
-            "expense_items_count": 1,
-            "remarks": None,
-        },
-        "Submitted",
-    ]
-
-    result = submit_purchase_invoice("user@example.com")
-
-    assert result == {
-        "success": True,
+    mock_frappe.db.get_value.side_effect = None
+    mock_frappe.db.get_value.return_value = {
+        "docstatus": 0,
+        "company": "Acme Pty Ltd",
+        "expense_item_name": "Fuel",
+        "expense_items_count": 1,
+        "remarks": None,
+    }
+    mock_app.tenant_db.get_doc.return_value = MagicMock()
+    stub_frappe_client_submit.return_value = {
         "name": "ACC-PINV-2026-00001",
         "docstatus": 1,
         "status": "Submitted",
     }
+
+    result = frappe_client_submit("user@example.com")
+
+    assert result["name"] == "ACC-PINV-2026-00001"
+    assert result["docstatus"] == 1
     mock_frappe.db.set_value.assert_called_with(
-        "Purchase Invoice",
-        "ACC-PINV-2026-00001",
-        {"docstatus": 1, "status": "Submitted", "title": "Fuel"},
+        "Purchase Invoice", "ACC-PINV-2026-00001", "title", "Fuel"
     )
-    assert mock_frappe.db.commit.call_count >= 1
+    stub_frappe_client_submit.assert_called_once_with(
+        {"doctype": "Purchase Invoice", "name": "ACC-PINV-2026-00001"}
+    )
 
 
-def test_submit_purchase_invoice_accepts_invoice_name_alias():
+def test_frappe_client_submit_accepts_doc_and_invoice_name_alias():
     sys.modules["flask"].request.get_json.return_value = {"invoice_name": "PI-2"}
     mock_frappe.defaults = MagicMock()
     mock_frappe.defaults.get_user_default.return_value = "Acme Pty Ltd"
-    mock_frappe.db.get_value.side_effect = [
-        {
-            "docstatus": 0,
-            "company": "Acme Pty Ltd",
-            "expense_item_name": "Coffee",
-            "expense_items_count": 2,
-            "remarks": "Team",
-        },
-        "Submitted",
-    ]
+    mock_frappe.db.get_value.return_value = {
+        "docstatus": 0,
+        "company": "Acme Pty Ltd",
+        "expense_item_name": "Coffee",
+        "expense_items_count": 2,
+        "remarks": "Team",
+    }
+    mock_app.tenant_db.get_doc.return_value = MagicMock()
+    stub_frappe_client_submit.return_value = {"name": "PI-2", "docstatus": 1}
 
-    result = submit_purchase_invoice("user@example.com")
+    frappe_client_submit("user@example.com")
 
-    assert result["name"] == "PI-2"
     mock_frappe.db.set_value.assert_called_with(
-        "Purchase Invoice",
-        "PI-2",
-        {"docstatus": 1, "status": "Submitted", "title": "Coffee (+1 more)"},
+        "Purchase Invoice", "PI-2", "title", "Coffee (+1 more)"
+    )
+    stub_frappe_client_submit.assert_called_once_with(
+        {"doctype": "Purchase Invoice", "name": "PI-2"}
     )
 
 
-def test_submit_purchase_invoice_requires_name():
+def test_frappe_client_submit_accepts_frappe_doc_payload():
+    sys.modules["flask"].request.get_json.return_value = {
+        "doc": {"doctype": "Purchase Invoice", "name": "PI-DOC-1"}
+    }
+    mock_frappe.defaults = MagicMock()
+    mock_frappe.defaults.get_user_default.return_value = "Acme Pty Ltd"
+    mock_frappe.db.get_value.return_value = {
+        "docstatus": 0,
+        "company": "Acme Pty Ltd",
+        "expense_item_name": "X",
+        "expense_items_count": 1,
+        "remarks": None,
+    }
+    mock_app.tenant_db.get_doc.return_value = MagicMock()
+    stub_frappe_client_submit.return_value = {"name": "PI-DOC-1", "docstatus": 1}
+
+    frappe_client_submit("user@example.com")
+
+    stub_frappe_client_submit.assert_called_once_with(
+        {"doctype": "Purchase Invoice", "name": "PI-DOC-1"}
+    )
+
+
+def test_frappe_client_submit_requires_name():
     sys.modules["flask"].request.get_json.return_value = {}
     mock_frappe.defaults = MagicMock()
     mock_frappe.defaults.get_user_default.return_value = "Acme Pty Ltd"
-    body, code = submit_purchase_invoice("user@example.com")
+    body, code = frappe_client_submit("user@example.com")
     assert code == 400
     assert body["status"] == "error"
     assert body["type"] == "ValidationError"
-    assert "name or invoice_name" in body["message"]
+    assert "doc" in body["message"].lower() or "name" in body["message"].lower()
 
 
-def test_submit_purchase_invoice_requires_company():
+def test_frappe_client_submit_requires_company():
     sys.modules["flask"].request.get_json.return_value = {"name": "PI-1"}
     mock_frappe.defaults = None
     mock_frappe.session = MagicMock()
     mock_frappe.session.user = "Guest"
     mock_frappe.db.get_value.return_value = None
-    body, code = submit_purchase_invoice("user@example.com")
+    body, code = frappe_client_submit("user@example.com")
     assert code == 400
     assert body["type"] == "ValidationError"
     assert "Company is required" in body["message"]
 
 
-def test_submit_purchase_invoice_not_found():
+def test_frappe_client_submit_not_found():
     sys.modules["flask"].request.get_json.return_value = {"name": "missing"}
     mock_frappe.defaults = MagicMock()
     mock_frappe.defaults.get_user_default.return_value = "Acme Pty Ltd"
     mock_frappe.db.get_value.side_effect = None
     mock_frappe.db.get_value.return_value = None
-    body, code = submit_purchase_invoice("user@example.com")
+    body, code = frappe_client_submit("user@example.com")
     assert code == 404
     assert body["type"] == "DoesNotExistError"
     assert "missing" in body["message"]
 
 
-def test_submit_purchase_invoice_wrong_company():
+def test_frappe_client_submit_wrong_company():
     sys.modules["flask"].request.get_json.return_value = {"name": "PI-1"}
     mock_frappe.defaults = MagicMock()
     mock_frappe.defaults.get_user_default.return_value = "Acme Pty Ltd"
@@ -708,13 +750,13 @@ def test_submit_purchase_invoice_wrong_company():
         "expense_items_count": 1,
         "remarks": None,
     }
-    body, code = submit_purchase_invoice("user@example.com")
+    body, code = frappe_client_submit("user@example.com")
     assert code == 403
     assert body["type"] == "PermissionError"
     assert "do not have access" in body["message"]
 
 
-def test_submit_purchase_invoice_rejects_non_draft():
+def test_frappe_client_submit_rejects_non_draft():
     sys.modules["flask"].request.get_json.return_value = {"name": "PI-1"}
     mock_frappe.defaults = MagicMock()
     mock_frappe.defaults.get_user_default.return_value = "Acme Pty Ltd"
@@ -726,31 +768,10 @@ def test_submit_purchase_invoice_rejects_non_draft():
         "expense_items_count": 1,
         "remarks": None,
     }
-    body, code = submit_purchase_invoice("user@example.com")
+    body, code = frappe_client_submit("user@example.com")
     assert code == 400
     assert body["type"] == "ValidationError"
     assert "Only draft" in body["message"]
-
-
-def test_submit_purchase_invoice_retries_status_when_not_submitted():
-    sys.modules["flask"].request.get_json.return_value = {"name": "PI-9"}
-    mock_frappe.defaults = MagicMock()
-    mock_frappe.defaults.get_user_default.return_value = "Acme Pty Ltd"
-    mock_frappe.db.get_value.side_effect = [
-        {
-            "docstatus": 0,
-            "company": "Acme Pty Ltd",
-            "expense_item_name": "Paper",
-            "expense_items_count": 1,
-            "remarks": None,
-        },
-        "Unpaid",
-        "Submitted",
-    ]
-
-    submit_purchase_invoice("user@example.com")
-
-    assert mock_frappe.db.set_value.call_count >= 2
 
 
 # ── slim GET/POST projection (resource API) ─────────────────────────────────
