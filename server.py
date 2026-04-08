@@ -22,31 +22,15 @@ if hasattr(controller_module, "get_controller_registry"):
     controller_module._registry = controller_module.get_controller_registry()
 setup_controllers(app, controllers_directory=controllers_dir)
 
+import expense_tracker.api as expense_tracker_api  # noqa: E402 — after app; registers API routes
 
-def _purchase_invoice_get(user, name):
-    """GET one — body from frappe.as_json() so timedelta/date never hit Flask jsonify()."""
-    import frappe
-    from flask import Response
-
-    try:
-        doc = app.tenant_db.get_doc("Purchase Invoice", name)
-        body = frappe.as_json(doc.as_dict())
-        return Response(body, mimetype="application/json", status=200)
-    except frappe.PermissionError:
-        return {"error": "Access denied"}, 403
-    except frappe.DoesNotExistError:
-        return {"error": "Purchase Invoice not found"}, 404
-
-
-# Register resources for this service. Item Group is used for expense category grouping.
+# Purchase Invoice: custom delete cancels submitted invoices then deletes.
 app.register_resource(
     "Purchase Invoice",
-    custom_handlers={"get": _purchase_invoice_get},
+    custom_handlers={"delete": expense_tracker_api.delete_purchase_invoice},
 )
 app.register_resource("Item Group")
 app.register_resource("Item")
-
-import expense_tracker.api  # Register whitelisted custom API method after app is ready
 
 if __name__ == "__main__":
     app.run()

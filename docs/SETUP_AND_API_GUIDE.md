@@ -388,7 +388,7 @@ curl -sS -X PUT "http://localhost:8000/api/resource/Purchase%20Invoice/ACC-PINV-
 
 ### Delete an Expense
 
-Only works if the invoice is still Draft (not submitted/cancelled):
+`DELETE` removes the Purchase Invoice. If the document is **Submitted** (docstatus 1), the expense service cancels it first (same as the former cancel-only step), then deletes. Draft and already-cancelled invoices are deleted directly.
 
 ```bash
 curl -sS -X DELETE "http://localhost:8000/api/resource/Purchase%20Invoice/ACC-PINV-2026-00001" \
