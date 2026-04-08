@@ -1,5 +1,8 @@
 # Expense Service
 
+[![CI/CD Pipeline](https://github.com/ATXINVOX/expense-service/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ATXINVOX/expense-service/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/ATXINVOX/expense-service/actions/workflows/github-code-scanning/codeql/badge.svg?branch=main)](https://github.com/ATXINVOX/expense-service/security/code-scanning)
+
 This service is the backend for the Mobile Expense Tracker.
 
 It uses a strict Frappe-style API surface and keeps the mobile payloads minimal:
