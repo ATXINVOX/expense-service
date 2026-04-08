@@ -115,6 +115,79 @@ jobs:
               bash -c "cd $BENCH && bench --site dev.localhost execute erpnext.setup.utils.before_tests"
           fi
 
+      - name: Create test company with full ERPNext chart of accounts
+        run: |
+          docker compose -f docker-compose.integration.yml exec -T dev-central-site \
+            /home/frappe/frappe-bench/env/bin/python - << 'PYEOF'
+          import frappe
+          frappe.init(site='dev.localhost', sites_path='/home/frappe/frappe-bench/sites')
+          frappe.connect()
+          frappe.set_user("Administrator")
+
+          TEST_COMPANY = "_Test Expense Integ Co"
+          TEST_ABBR    = "TEIC"
+
+          if not frappe.db.exists("Company", TEST_COMPANY):
+              # Create via ERPNext's proper flow so it auto-builds the full chart
+              # of accounts (account_currency, lft/rgt tree, payable/expense
+              # accounts, cost centers) — required for doc.submit() GL entries.
+              company = frappe.get_doc({
+                  "doctype": "Company",
+                  "company_name": TEST_COMPANY,
+                  "abbr": TEST_ABBR,
+                  "default_currency": "AUD",
+                  "country": "Australia",
+                  "create_chart_of_accounts_based_on": "Standard Template",
+                  "chart_of_accounts": "Standard",
+              })
+              company.insert(ignore_permissions=True)
+              frappe.db.commit()
+              print(f"Created company: {TEST_COMPANY}")
+          else:
+              print(f"Company already exists: {TEST_COMPANY}")
+
+          # Ensure account_currency is set on all accounts for this company
+          # (guards against accounts created with ignore_mandatory=True).
+          default_currency = frappe.db.get_value("Company", TEST_COMPANY, "default_currency") or "AUD"
+          frappe.db.sql("""
+              UPDATE `tabAccount`
+              SET account_currency = %s
+              WHERE company = %s AND (account_currency IS NULL OR account_currency = '')
+          """, (default_currency, TEST_COMPANY))
+
+          # Ensure the company has a default payable account and cost center set.
+          payable = frappe.db.get_value(
+              "Account",
+              {"company": TEST_COMPANY, "account_type": "Payable", "is_group": 0},
+              "name",
+          )
+          if payable:
+              frappe.db.set_value("Company", TEST_COMPANY, "default_payable_account", payable)
+              print(f"Set default_payable_account: {payable}")
+
+          expense = frappe.db.get_value(
+              "Account",
+              {"company": TEST_COMPANY, "account_type": "Expense Account", "is_group": 0},
+              "name",
+          )
+          if expense:
+              frappe.db.set_value("Company", TEST_COMPANY, "default_expense_account", expense)
+              print(f"Set default_expense_account: {expense}")
+
+          cost_center = frappe.db.get_value(
+              "Cost Center",
+              {"company": TEST_COMPANY, "is_group": 0},
+              "name",
+          )
+          if cost_center:
+              frappe.db.set_value("Company", TEST_COMPANY, "cost_center", cost_center)
+              print(f"Set cost_center: {cost_center}")
+
+          frappe.db.commit()
+          print("Test company setup complete.")
+          frappe.destroy()
+          PYEOF
+
       - name: Install frappe-microservice lib and test deps
         run: |
           docker compose -f docker-compose.integration.yml exec -T dev-central-site \

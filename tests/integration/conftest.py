@@ -181,6 +181,8 @@ def test_accounts(frappe_session, test_company):
     """Ensure minimum chart of accounts exists for the test company."""
     abbr = TEST_COMPANY_ABBR
 
+    company_currency = frappe.db.get_value("Company", test_company, "default_currency") or "AUD"
+
     def _ensure_account(name, account_name, root_type, report_type,
                         account_type=None, parent=None, is_group=0):
         if not frappe.db.exists("Account", name):
@@ -191,6 +193,8 @@ def test_accounts(frappe_session, test_company):
                 "root_type": root_type,
                 "report_type": report_type,
                 "is_group": is_group,
+                # Required for GL entry currency validation during doc.submit()
+                "account_currency": company_currency,
             }
             if account_type:
                 data["account_type"] = account_type
@@ -198,12 +202,18 @@ def test_accounts(frappe_session, test_company):
                 data["parent_account"] = parent
             doc = frappe.get_doc(data)
             doc.insert(ignore_permissions=True, ignore_mandatory=True)
-        elif account_type:
-            # ERPNext bootstrap may have created the account without account_type;
-            # ensure it is always set to the expected value.
-            current = frappe.db.get_value("Account", name, "account_type")
-            if current != account_type:
-                frappe.db.set_value("Account", name, "account_type", account_type)
+        else:
+            # Account already exists — patch account_type and account_currency
+            # in case it was created without them (e.g. ignore_mandatory=True).
+            updates = {}
+            if account_type:
+                current = frappe.db.get_value("Account", name, "account_type")
+                if current != account_type:
+                    updates["account_type"] = account_type
+            if not frappe.db.get_value("Account", name, "account_currency"):
+                updates["account_currency"] = company_currency
+            if updates:
+                frappe.db.set_value("Account", name, updates)
         return name
 
     # Root accounts (groups)

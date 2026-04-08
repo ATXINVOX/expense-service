@@ -144,8 +144,7 @@ def frappe_client_submit(user):
     """Submit a document on this site.
 
     For **Purchase Invoice**, validates company ownership, tenant access, and draft state,
-    then directly promotes the document to Submitted (docstatus=1) without running ERPNext's
-    full GL entry creation (which is not required in the microservice context).
+    then calls ``doc.submit()`` to run ERPNext's full submission lifecycle (GL entries, etc.).
     Returns ``{"success": true, "status": "Submitted", "name": "<id>"}``.
 
     For other doctypes, delegates to ``frappe.client.submit``.
@@ -244,12 +243,12 @@ def frappe_client_submit(user):
             if expense_title:
                 frappe.db.set_value("Purchase Invoice", name, "title", expense_title)
 
-            frappe.db.set_value(
-                "Purchase Invoice", name, {"docstatus": 1, "status": "Submitted"}
-            )
+            doc = frappe.get_doc("Purchase Invoice", name)
+            doc.flags.ignore_permissions = True
+            doc.submit()
             frappe.db.commit()
-            logger.info("SUBMIT: success name=%s user=%s", name, user)
-            return {"success": True, "status": "Submitted", "name": name}
+            logger.info("SUBMIT: success name=%s docstatus=%s user=%s", name, doc.docstatus, user)
+            return {"success": True, "status": doc.status or "Submitted", "name": doc.name}
 
         _app_db().get_doc(doctype, name, verify_tenant=True)
         logger.info("SUBMIT (frappe.client.submit): %s %s user=%s", doctype, name, user)
