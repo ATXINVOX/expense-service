@@ -1,0 +1,9 @@
+{
+  "title": "Expense service API reference — index",
+  "miro_sticky_notes": "api_miro_sticky_notes.txt — plain text blocks to copy one section per Miro sticky (not a single JSON file).",
+  "machine_readable": "api_reference_numbered.json",
+  "legacy_split": {
+    "post_and_put": "expense_api_reference_post.json",
+    "get": "expense_api_reference_get.json"
+  }
+}
