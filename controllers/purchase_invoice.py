@@ -634,8 +634,8 @@ class PurchaseInvoice(DocumentController):
     Auto-populate accounting values for Purchase Invoice records created by the mobile app.
 
     Create flow: POST keeps the document as Draft (docstatus 0). After the user confirms,
-    the app calls POST /api/method/expense_tracker.api.submit_purchase_invoice with the
-    invoice name to set docstatus 1 and status Submitted (same DB update path as before).
+    the app calls POST /api/method/frappe.client.submit (body ``doc`` or ``name``) so Frappe
+    runs the real Purchase Invoice submit path (doc.submit()).
 
     Custom fields populated on every save:
       - expense_item_name  : primary item's display name

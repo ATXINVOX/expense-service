@@ -5,7 +5,7 @@ Feature: Expense custom fields on Purchase Invoice
   expense details in a single call — no custom API endpoint required.
 
   Lifecycle: new expenses are saved as Draft (docstatus 0). After the user
-  confirms, call POST /api/method/expense_tracker.api.submit_purchase_invoice
+  confirms, call POST /api/method/frappe.client.submit
   with {"name":"<invoice name>"} to set Submitted. Executable BDD for that flow
   lives in expense_submit/expense_draft_submit.feature (step definitions in
   cypress/support/step_definitions/expense_api_steps.js).

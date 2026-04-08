@@ -94,7 +94,7 @@ Then("the stored invoice should have workflow status {string}", (st) => {
 When("I POST submit_purchase_invoice for the stored invoice name", () => {
   cy.request({
     method: "POST",
-    url: `${serviceBaseUrl()}/api/method/expense_tracker.api.submit_purchase_invoice`,
+    url: `${serviceBaseUrl()}/api/method/frappe.client.submit`,
     headers: sessionHeaders(),
     body: { name: state.storedInvoiceName },
     failOnStatusCode: false,
@@ -107,7 +107,7 @@ When("I POST submit_purchase_invoice with JSON body:", (docString) => {
   const body = JSON.parse(docString.trim());
   cy.request({
     method: "POST",
-    url: `${serviceBaseUrl()}/api/method/expense_tracker.api.submit_purchase_invoice`,
+    url: `${serviceBaseUrl()}/api/method/frappe.client.submit`,
     headers: sessionHeaders(),
     body,
     failOnStatusCode: false,

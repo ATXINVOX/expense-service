@@ -1,7 +1,7 @@
 @expense-api
 Feature: Expense draft and confirm submit
   Purchase Invoices are created as Draft (docstatus 0). After the user confirms,
-  POST /api/method/expense_tracker.api.submit_purchase_invoice promotes them to
+  POST /api/method/frappe.client.submit promotes them to
   Submitted (docstatus 1, status Submitted).
 
   These scenarios require a running expense-service and a valid session.
