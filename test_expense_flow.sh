@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ─── Single-expense flow (draft → update → submit → optional cancel) ───
+# ─── Single-expense flow (draft → update → submit → optional cancel → optional delete) ───
 #
 # Env overrides:
 #   EXPENSE_BASE_URL          API root (default prompts or http://localhost:8000)
@@ -14,8 +14,16 @@ set -euo pipefail
 #   EXPENSE_UNIQUE_ITEMS=1    append e2e-<ts>-<rand>-$$ to item group/code (default 1; set 0 for prod)
 #   EXPENSE_CANCEL=1          after submit, call cancel API (non-interactive)
 #   EXPENSE_CANCEL=0          skip cancel and do not prompt (good for CI / e2e)
+#   EXPENSE_DELETE=1          DELETE invoice + GET expect 404 (see below).
+#   EXPENSE_STOP_BEFORE_SUBMIT=1  exit after PUT (step 5); pair with EXPENSE_DELETE=1 to delete draft.
+#                             Without this, DELETE runs after cancel (step 8) and often fails if still submitted.
 #   EXPENSE_SKIP_ITEM_SETUP=1 skip POST Item Group / Item (use when they already exist)
 #   EXPENSE_INCLUDE_EXTRAS=1  also run: reject cancel-while-draft, list, dashboard
+#   EXPENSE_EXTENDED_GET_DELETE=1  after main flow: explicit GET submitted + DELETE try (submitted);
+#                             second draft PI → GET draft → DELETE → GET 404. With STOP_BEFORE_SUBMIT,
+#                             runs GET+DELETE on the main draft before exit.
+#
+# GET by id: steps 4 (after create) and 7 (after submit) — GET /api/resource/Purchase%20Invoice/{ENC}
 #
 # Optional cancel (if EXPENSE_CANCEL unset): TTY prompts "Cancel after submit? [y/N]"
 
@@ -87,6 +95,57 @@ urlencode_name() {
   PINV_NAME="$1" python3 -c 'import os, urllib.parse; print(urllib.parse.quote(os.environ["PINV_NAME"], safe=""))'
 }
 
+# GET by id; print HTTP + one-line name/docstatus/status (optional full JSON via EXPENSE_GET_FULL_JSON=1).
+run_get_pinv_by_id() {
+  local enc="$1"
+  local title="$2"
+  echo "──── GET by id — $title ────"
+  local G G_HTTP G_BODY
+  G=$(curl -s -w "\n%{http_code}" -X GET \
+    "$BASE_URL/api/resource/Purchase%20Invoice/$enc" \
+    "${HEADERS[@]}")
+  G_HTTP=$(echo "$G" | tail -1)
+  G_BODY=$(echo "$G" | sed '$d')
+  echo "HTTP $G_HTTP"
+  if [[ "${EXPENSE_GET_FULL_JSON:-}" == "1" ]]; then
+    echo "$G_BODY" | python3 -m json.tool 2>/dev/null || echo "$G_BODY"
+  else
+    echo "$G_BODY" | python3 -c "import sys,json; d=json.load(sys.stdin); print('  name=%r docstatus=%s status=%r'%(d.get('name'),d.get('docstatus'),d.get('status')))" 2>/dev/null || echo "$G_BODY"
+  fi
+  [[ "$G_HTTP" -ge 200 && "$G_HTTP" -lt 300 ]] || return 1
+  echo ""
+  return 0
+}
+
+# DELETE Purchase Invoice then GET — expect 404 ($1 = URL-encoded name; default: global ENC).
+run_delete_pinv_and_verify() {
+  local enc="${1:-$ENC}"
+  echo "──── DELETE by id — $enc ────"
+  local DEL_R DEL_HTTP DEL_BODY GETD GETD_HTTP GETD_BODY
+  DEL_R=$(curl -s -w "\n%{http_code}" -X DELETE \
+    "$BASE_URL/api/resource/Purchase%20Invoice/$enc" \
+    "${HEADERS[@]}")
+  DEL_HTTP=$(echo "$DEL_R" | tail -1)
+  DEL_BODY=$(echo "$DEL_R" | sed '$d')
+  echo "HTTP $DEL_HTTP"
+  echo "$DEL_BODY" | python3 -m json.tool 2>/dev/null || echo "$DEL_BODY"
+  [[ "$DEL_HTTP" -ge 200 && "$DEL_HTTP" -lt 300 ]] || return 1
+  echo "✓ Deleted"
+  echo ""
+  echo "──── GET after delete (expect 404) ────"
+  GETD=$(curl -s -w "\n%{http_code}" -X GET \
+    "$BASE_URL/api/resource/Purchase%20Invoice/$enc" \
+    "${HEADERS[@]}")
+  GETD_HTTP=$(echo "$GETD" | tail -1)
+  GETD_BODY=$(echo "$GETD" | sed '$d')
+  echo "HTTP $GETD_HTTP"
+  echo "$GETD_BODY" | python3 -m json.tool 2>/dev/null || echo "$GETD_BODY"
+  [[ "$GETD_HTTP" == "404" ]] || return 2
+  echo "✓ Confirmed removed"
+  echo ""
+  return 0
+}
+
 build_create_payload() {
   ITEM_GROUP="$ITEM_GROUP" ITEM_CODE="$ITEM_CODE" SUPPLIER="$SUPPLIER" POSTING_DATE="$POSTING_DATE" python3 <<'PY'
 import json, os
@@ -106,7 +165,7 @@ PY
 
 echo ""
 echo "═══════════════════════════════════════════════════════════════"
-echo "  Expense: draft → PUT update → submit → optional cancel"
+echo "  Expense: draft → PUT update → submit → optional cancel → optional DELETE"
 echo "═══════════════════════════════════════════════════════════════"
 echo "  Base URL : $BASE_URL"
 echo "  Company  : $COMPANY"
@@ -199,6 +258,23 @@ echo "$PUT_BODY" | python3 -m json.tool 2>/dev/null || echo "$PUT_BODY"
 echo "✓ Updated"
 echo ""
 
+if [[ "${EXPENSE_STOP_BEFORE_SUBMIT:-}" == "1" ]]; then
+  echo "──── STOP_BEFORE_SUBMIT: skipping submit / cancel ────"
+  if [[ "${EXPENSE_EXTENDED_GET_DELETE:-}" == "1" ]]; then
+    run_get_pinv_by_id "$ENC" "main invoice (draft)" || exit 1
+    run_delete_pinv_and_verify "$ENC" || { echo "FAILED: draft DELETE or post-delete GET"; exit 1; }
+  elif [[ "${EXPENSE_DELETE:-}" == "1" ]]; then
+    run_delete_pinv_and_verify || { echo "FAILED: DELETE or post-delete GET"; exit 1; }
+  else
+    echo "(invoice still draft on server — set EXPENSE_DELETE=1 or EXPENSE_EXTENDED_GET_DELETE=1)"
+    echo ""
+  fi
+  echo "═══════════════════════════════════════════════════════════════"
+  echo "  Done (stopped before submit) — invoice: $PINV_NAME"
+  echo "═══════════════════════════════════════════════════════════════"
+  exit 0
+fi
+
 echo "──── 6. POST submit (draft → submitted) ────"
 SUB_PAYLOAD=$(PINV_NAME="$PINV_NAME" python3 -c 'import json,os; print(json.dumps({"name": os.environ["PINV_NAME"]}))')
 SUB_RESP=$(curl -s -w "\n%{http_code}" -X POST \
@@ -251,6 +327,87 @@ else
 fi
 echo ""
 
+if [[ "${EXPENSE_EXTENDED_GET_DELETE:-}" == "1" ]]; then
+  echo "═══════════════════════════════════════════════════════════════"
+  echo "  EXTENDED: GET/DELETE by id (submitted + draft)"
+  echo "═══════════════════════════════════════════════════════════════"
+  echo ""
+
+  echo "──── Ext 1. GET by id (main invoice — expect submitted) ────"
+  run_get_pinv_by_id "$ENC" "main after submit (docstatus 1)" || exit 1
+
+  echo "──── Ext 2. DELETE by id (submitted — often blocked by ERPNext) ────"
+  SUBDEL=$(curl -s -w "\n%{http_code}" -X DELETE \
+    "$BASE_URL/api/resource/Purchase%20Invoice/$ENC" \
+    "${HEADERS[@]}")
+  SUBDEL_HTTP=$(echo "$SUBDEL" | tail -1)
+  SUBDEL_BODY=$(echo "$SUBDEL" | sed '$d')
+  echo "HTTP $SUBDEL_HTTP"
+  echo "$SUBDEL_BODY" | python3 -m json.tool 2>/dev/null || echo "$SUBDEL_BODY"
+  if [[ "$SUBDEL_HTTP" -ge 200 && "$SUBDEL_HTTP" -lt 300 ]]; then
+    echo "✓ Submitted invoice was deletable (unusual for ERPNext)."
+    echo "──── Ext 2b. GET after delete main (expect 404) ────"
+    GONE=$(curl -s -w "\n%{http_code}" -X GET \
+      "$BASE_URL/api/resource/Purchase%20Invoice/$ENC" \
+      "${HEADERS[@]}")
+    echo "HTTP $(echo "$GONE" | tail -1)"
+    echo "$(echo "$GONE" | sed '$d')" | python3 -m json.tool 2>/dev/null || echo "$(echo "$GONE" | sed '$d')"
+    echo ""
+    echo "⚠ Main invoice removed; skipping Ext 3 second draft demo."
+  else
+    echo "⚠ Submitted DELETE returned HTTP $SUBDEL_HTTP (typical — ERPNext keeps submitted docs)."
+    echo ""
+    echo "──── Ext 3. Second PI (draft only) — POST → GET → DELETE → GET 404 ────"
+    EXT_JSON=$(COMPANY="$COMPANY" ITEM_GROUP="$ITEM_GROUP" ITEM_CODE="$ITEM_CODE" SUPPLIER="$SUPPLIER" POSTING_DATE="$POSTING_DATE" python3 <<'PY'
+import json, os
+d = {
+    "supplier": os.environ["SUPPLIER"],
+    "posting_date": os.environ["POSTING_DATE"],
+    "remarks": "Extended: draft GET/DELETE demo (second PI)",
+    "items": [{"item_code": os.environ["ITEM_CODE"], "item_group": os.environ["ITEM_GROUP"], "qty": 1, "rate": 0.01}],
+}
+c = (os.environ.get("COMPANY") or "").strip()
+if c:
+    d["company"] = c
+print(json.dumps(d))
+PY
+)
+    P2R=$(curl -s -w "\n%{http_code}" -X POST \
+      "$BASE_URL/api/resource/Purchase%20Invoice" \
+      "${HEADERS[@]}" \
+      -d "$EXT_JSON")
+    P2_HTTP=$(echo "$P2R" | tail -1)
+    P2_BODY=$(echo "$P2R" | sed '$d')
+    echo "POST HTTP $P2_HTTP"
+    echo "$P2_BODY" | python3 -m json.tool 2>/dev/null || echo "$P2_BODY"
+    [[ "$P2_HTTP" -ge 200 && "$P2_HTTP" -lt 300 ]] || { echo "FAILED: second PI create"; exit 1; }
+    PINV2=$(echo "$P2_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('name',''))" 2>/dev/null || true)
+    [[ -n "$PINV2" ]] || { echo "FAILED: no name for second PI"; exit 1; }
+    ENC2=$(urlencode_name "$PINV2")
+    echo "✓ Second draft: $PINV2"
+    echo ""
+
+    run_get_pinv_by_id "$ENC2" "second PI (draft)" || exit 1
+    run_delete_pinv_and_verify "$ENC2" || { echo "FAILED: second PI delete"; exit 1; }
+  fi
+  echo ""
+fi
+
+if [[ "${EXPENSE_DELETE:-}" == "1" ]] && [[ "${EXPENSE_EXTENDED_GET_DELETE:-}" != "1" ]]; then
+  echo "──── 9–10. DELETE + GET (expect 404) ────"
+  if run_delete_pinv_and_verify; then
+    :
+  else
+    echo "FAILED: DELETE or post-delete GET."
+    echo "  Hint: ERPNext usually allows DELETE only on draft — use"
+    echo "  EXPENSE_STOP_BEFORE_SUBMIT=1 EXPENSE_DELETE=1 ... to delete after PUT without submitting."
+    exit 1
+  fi
+elif [[ "${EXPENSE_EXTENDED_GET_DELETE:-}" != "1" ]]; then
+  echo "──── 9–10. Skip DELETE + verify GET (EXPENSE_DELETE=1; draft path: add EXPENSE_STOP_BEFORE_SUBMIT=1) ────"
+  echo ""
+fi
+
 if [[ "${EXPENSE_INCLUDE_EXTRAS:-}" == "1" ]]; then
   echo "──── List + dashboard ────"
   curl -s -G "$BASE_URL/api/resource/Purchase%20Invoice" \
@@ -271,6 +428,16 @@ echo ""
 echo "─── cURL reference (replace BASE, SID, NAME, ENC) ───"
 echo "# URL-encode invoice name for path:"
 echo 'ENC=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=\"\"))" "NAME")'
+echo ""
+echo "# GET one by id (full JSON document):"
+echo 'curl -s -X GET "${BASE}/api/resource/Purchase%20Invoice/${ENC}" \'
+echo '  -H "Accept: application/json" -H "X-Requested-With: XMLHttpRequest" \'
+echo '  -H "X-Frappe-SID: ${SID}" -H "Cookie: sid=${SID}"'
+echo ""
+echo "# DELETE one (draft usually OK; submitted may fail):"
+echo 'curl -s -X DELETE "${BASE}/api/resource/Purchase%20Invoice/${ENC}" \'
+echo '  -H "Accept: application/json" -H "X-Requested-With: XMLHttpRequest" \'
+echo '  -H "X-Frappe-SID: ${SID}" -H "Cookie: sid=${SID}"'
 echo ""
 echo "# UPDATE draft (PUT):"
 echo 'curl -s -X PUT "${BASE}/api/resource/Purchase%20Invoice/${ENC}" \'
