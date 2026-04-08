@@ -8,8 +8,10 @@ services:
     volumes:
       # expense-service source (controllers/, expense_tracker/, server.py, tests/)
       - .:/mnt/expense
-      # frappe-microservice-lib — installed via pip inside the container
-      - ../frappe-microservice-lib:/mnt/lib
+      # frappe-microservice-lib — installed via pip inside the container.
+      # CI sets MS_LIB_PATH=./frappe-microservice-lib (in-workspace checkout).
+      # Local dev leaves MS_LIB_PATH unset, falling back to the sibling repo.
+      - ${MS_LIB_PATH:-../frappe-microservice-lib}:/mnt/lib
 
   cypress:
     image: cypress/included:13.6.0

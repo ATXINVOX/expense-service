@@ -40,15 +40,19 @@ jobs:
   integration-test:
     needs: test
     runs-on: ubuntu-latest
+    env:
+      # Points the ../frappe-microservice-lib volume mount to the in-workspace
+      # checkout. Local dev leaves MS_LIB_PATH unset → uses the default.
+      MS_LIB_PATH: ./frappe-microservice-lib
     steps:
       - name: Checkout expense-service
         uses: actions/checkout@v4
 
-      - name: Checkout frappe-microservice-lib (sibling repo)
+      - name: Checkout frappe-microservice-lib
         uses: actions/checkout@v4
         with:
           repository: ATXINVOX/frappe-microservice-lib
-          path: ../frappe-microservice-lib
+          path: frappe-microservice-lib
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Start integration container
