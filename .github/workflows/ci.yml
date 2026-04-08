@@ -98,9 +98,11 @@ jobs:
           docker compose -f docker-compose.integration.yml exec -T dev-central-site \
             /home/frappe/frappe-bench/env/bin/pip install --quiet /mnt/lib pytest pytest-cov
 
-      - name: Run integration tests with coverage
+      - name: Run Python integration tests with coverage
         run: |
-          docker compose -f docker-compose.integration.yml exec -T dev-central-site \
+          docker compose -f docker-compose.integration.yml exec -T \
+            -e PYTHONPATH=/mnt/expense \
+            dev-central-site \
             /home/frappe/frappe-bench/env/bin/python -m pytest \
               /mnt/expense/tests/integration/ \
               --confcutdir=/mnt/expense/tests/integration \
@@ -112,9 +114,66 @@ jobs:
               --rootdir=/mnt/expense \
               -v --tb=short
 
+      - name: Seed Administrator tenant_id for Cypress HTTP tests
+        run: |
+          docker compose -f docker-compose.integration.yml exec -T dev-central-site \
+            /home/frappe/frappe-bench/env/bin/python - << 'PYEOF'
+          import frappe
+          frappe.init(site='dev.localhost', sites_path='/home/frappe/frappe-bench/sites')
+          frappe.connect()
+          cols = frappe.db.sql("SHOW COLUMNS FROM `tabUser` LIKE 'tenant_id'", as_list=True)
+          if not cols:
+              frappe.db.sql("ALTER TABLE `tabUser` ADD COLUMN `tenant_id` VARCHAR(140) DEFAULT NULL")
+              print("Added tenant_id column to tabUser")
+          frappe.db.sql(
+              "UPDATE `tabUser` SET tenant_id = %s WHERE name = 'Administrator'",
+              ("expense-integ-tenant-001",),
+          )
+          frappe.db.commit()
+          print("Administrator.tenant_id = expense-integ-tenant-001")
+          frappe.destroy()
+          PYEOF
+
+      - name: Start expense-service HTTP server on port 9004
+        run: |
+          BENCH="/home/frappe/frappe-bench"
+          # Read active site name from currentsite.txt — same approach used by bench migrate
+          FRAPPE_SITE=$(docker compose -f docker-compose.integration.yml exec -T dev-central-site \
+            bash -c "cat $BENCH/sites/currentsite.txt 2>/dev/null || echo dev.localhost" | tr -d '\r\n')
+          echo "Using Frappe site: $FRAPPE_SITE"
+          docker compose -f docker-compose.integration.yml exec -d dev-central-site bash -c "
+            export FRAPPE_SITES_PATH=$BENCH/sites
+            export FRAPPE_SITE=$FRAPPE_SITE
+            export SERVICE_PORT=9004
+            $BENCH/env/bin/gunicorn \
+              --chdir $BENCH \
+              --pythonpath /mnt/expense \
+              --bind 0.0.0.0:9004 \
+              --workers 2 \
+              --timeout 120 \
+              server:app \
+              >> /home/frappe/logs/expense-service.log 2>&1
+          "
+
+      - name: Wait for expense-service
+        run: |
+          for i in $(seq 1 20); do
+            if docker compose -f docker-compose.integration.yml exec -T dev-central-site \
+              curl -sf http://localhost:9004/health &>/dev/null; then
+              echo "expense-service ready"; exit 0
+            fi
+            echo "  attempt $i/20..."; sleep 3
+          done
+          echo "FATAL: expense-service not ready" && exit 1
+
+      - name: Run Cypress API tests
+        run: |
+          docker compose -f docker-compose.integration.yml \
+            --profile cypress run --rm cypress
+
       - name: Tear down
         if: always()
-        run: docker compose -f docker-compose.integration.yml down -v
+        run: docker compose -f docker-compose.integration.yml --profile cypress down -v
 
   build:
     needs: [test, integration-test]

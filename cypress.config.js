@@ -9,7 +9,9 @@ const {
 
 module.exports = defineConfig({
   e2e: {
-    baseUrl: "http://localhost:9004",
+    // CYPRESS_EXPENSE_SERVICE_URL is set by docker-compose; fall back to
+    // localhost:9004 for local runs without Docker.
+    baseUrl: process.env.CYPRESS_EXPENSE_SERVICE_URL || "http://localhost:9004",
     specPattern: "cypress/e2e/features/**/*.feature",
     supportFile: false,
     async setupNodeEvents(on, config) {
@@ -22,9 +24,9 @@ module.exports = defineConfig({
     },
   },
   env: {
-    EXPENSE_SERVICE_URL: "http://localhost:9004",
+    EXPENSE_SERVICE_URL: process.env.CYPRESS_EXPENSE_SERVICE_URL || "http://localhost:9004",
     EXPENSE_TEST_SID: "",
-    EXPENSE_TEST_COMPANY: "Acme Pty Ltd",
+    EXPENSE_TEST_COMPANY: process.env.CYPRESS_EXPENSE_TEST_COMPANY || "Acme Pty Ltd",
   },
   video: false,
   screenshotOnRunFailure: false,

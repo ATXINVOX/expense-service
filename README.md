@@ -150,28 +150,53 @@ KEEP_RUNNING=1 ./scripts/run_integration_tests.sh
 
 | File | Purpose |
 |------|---------|
-| `docker-compose.integration.yml` | Single `vyogo/erpnext:sne-version-16` service; mounts `.:/mnt/expense` and `../frappe-microservice-lib:/mnt/lib` |
-| `scripts/run_integration_tests.sh` | Orchestration: start → wait for site → bootstrap ERPNext data → install lib + pytest → run tests → teardown |
+| `docker-compose.integration.yml` | `dev-central-site` (ERPNext) + `cypress` (profile) services; mounts `.:/mnt/expense` and `../frappe-microservice-lib:/mnt/lib` |
+| `scripts/run_integration_tests.sh` | Orchestration: start → wait for site → bootstrap data → install lib + pytest → Python tests → start expense-service → Cypress tests → teardown |
 | `tests/integration/conftest.py` | Frappe session boot, company/accounts/fiscal year/supplier/item fixtures, `tenant_db`, `mock_app`, rollback |
 | `tests/integration/pytest.ini` | Pytest config for integration run (verbosity, timeout, markers) |
+
+### Cypress API tests (BDD + Cucumber)
+
+Cypress runs **after** the Python integration tests using the same ERPNext container. The `cypress` service (in the `cypress` Docker Compose profile) connects to `dev-central-site` via the shared Docker network.
+
+Authentication is handled automatically: Cypress calls `POST /api/method/login` on the Frappe instance and stores the session SID — no manual `EXPENSE_TEST_SID` injection is needed.
+
+| Feature file | Scenarios |
+|-------------|-----------|
+| `expense_submit/expense_draft_submit.feature` | Draft create → GET docstatus → submit → GET submitted; submit without name → 400 |
+| `expense_api/expense_full_api_flow.feature` | Full lifecycle: create → enrichment check; submit; delete draft; dashboard total_spend; submit without name → 400 |
+
+```bash
+# Run the full suite locally (Python + Cypress)
+./scripts/run_integration_tests.sh
+
+# Skip Python tests, run only Cypress
+SKIP_PYTHON=1 ./scripts/run_integration_tests.sh
+
+# Skip Cypress, run only Python
+SKIP_CYPRESS=1 ./scripts/run_integration_tests.sh
+
+# Run Cypress only (container already up)
+KEEP_RUNNING=1 SKIP_PYTHON=1 ./scripts/run_integration_tests.sh
+```
+
+Environment variables recognised by the Cypress container:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CYPRESS_EXPENSE_SERVICE_URL` | `http://dev-central-site:9004` | Expense-service HTTP base URL |
+| `CYPRESS_EXPENSE_FRAPPE_URL` | `http://dev-central-site:8000` | Frappe login endpoint |
+| `CYPRESS_EXPENSE_TEST_COMPANY` | `_Test Expense Integ Co` | Company created by Python fixtures |
+| `ADMIN_PASSWORD` | `admin` | Administrator password for Frappe login |
 
 ### CI/CD pipeline
 
 ```
-test (unit + coverage) → integration-test (container + coverage) → build (image)
+test (unit + coverage) → integration-test (Python + Cypress + coverage) → build (image)
 ```
 
 | Job | What it does |
 |-----|-------------|
 | **test** | Runs unit tests with `--cov` inside `ghcr.io/atxinvox/frappe-microservice-lib:latest` |
-| **integration-test** | Checks out sibling `frappe-microservice-lib` repo, starts ERPNext container, installs lib, runs `tests/integration/` with `--cov` |
+| **integration-test** | Checks out sibling `frappe-microservice-lib` repo → starts ERPNext container → installs lib → Python integration tests with `--cov` → starts expense-service on port 9004 → Cypress API tests via the `cypress` Docker service (same network) |
 | **build** | Builds and pushes the container image to GHCR — only after both test jobs pass |
-
-### BDD (Cypress + Cucumber)
-
-- `cypress/e2e/features/expense_submit/expense_draft_submit.feature` — end-to-end draft create, GET docstatus, POST submit, GET submitted (requires running API + `EXPENSE_TEST_SID`)
-- `cypress/e2e/features/expense_custom_fields/expense_custom_fields.feature` — spec / future steps for custom-field behaviour
-
-```bash
-cd expense-service && npm install && npx cypress run --spec 'cypress/e2e/features/expense_submit/**/*.feature' --env EXPENSE_TEST_SID=your_sid
-```

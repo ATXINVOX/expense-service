@@ -117,6 +117,19 @@ def _ensure_fiscal_year(posting_date: str | None, company: str):
     if existing:
         return existing
 
+    # Any existing FY that covers the posting date is acceptable (e.g. a
+    # calendar-year FY created by ERPNext bootstrap instead of a July-based one).
+    existing_by_date = frappe.db.get_value(
+        "Fiscal Year",
+        [
+            ["year_start_date", "<=", str(dt)],
+            ["year_end_date", ">=", str(dt)],
+        ],
+        "name",
+    )
+    if existing_by_date:
+        return existing_by_date
+
     try:
         fy_doc = _create_system_doc("Fiscal Year", {
             "name": fy_name,
@@ -658,6 +671,14 @@ class PurchaseInvoice(DocumentController):
             return
         _set_value(self, "company", company)
         logger.info("before_validate: company=%s", company)
+
+        # Default currency and conversion_rate from company when not supplied,
+        # preventing Frappe's party-account currency mismatch validation error.
+        if not _value(self, "currency", None):
+            company_currency = frappe.db.get_value("Company", company, "default_currency") or "USD"
+            _set_value(self, "currency", company_currency)
+        if not _value(self, "conversion_rate", None):
+            _set_value(self, "conversion_rate", 1.0)
 
         _get_default_cost_center(company)
         _ensure_default_payable_account(company)

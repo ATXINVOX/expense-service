@@ -130,6 +130,11 @@ def test_company(frappe_session):
         company.insert(ignore_permissions=True, ignore_mandatory=True)
         frappe.db.commit()
 
+    # TenantAwareDB injects tenant_id into all queries; set it on the company
+    # so controller lookups (company abbr, default accounts) can find it.
+    frappe.db.set_value("Company", TEST_COMPANY, "tenant_id", TEST_TENANT_ID)
+    frappe.db.commit()
+
     return TEST_COMPANY
 
 
@@ -193,6 +198,12 @@ def test_accounts(frappe_session, test_company):
                 data["parent_account"] = parent
             doc = frappe.get_doc(data)
             doc.insert(ignore_permissions=True, ignore_mandatory=True)
+        elif account_type:
+            # ERPNext bootstrap may have created the account without account_type;
+            # ensure it is always set to the expected value.
+            current = frappe.db.get_value("Account", name, "account_type")
+            if current != account_type:
+                frappe.db.set_value("Account", name, "account_type", account_type)
         return name
 
     # Root accounts (groups)
@@ -219,6 +230,12 @@ def test_accounts(frappe_session, test_company):
     })
     frappe.db.commit()
 
+    # TenantAwareDB injects tenant_id into all queries; tag key records so
+    # controller lookups (_company_abbr, expense account, cost center) find them.
+    for acct in (payable, expense):
+        frappe.db.set_value("Account", acct, "tenant_id", TEST_TENANT_ID)
+    frappe.db.commit()
+
     # Cost center
     cc_root = f"{test_company} - {abbr}"
     if not frappe.db.exists("Cost Center", cc_root):
@@ -240,6 +257,11 @@ def test_accounts(frappe_session, test_company):
         }).insert(ignore_permissions=True, ignore_mandatory=True)
 
     frappe.db.set_value("Company", test_company, "cost_center", cc_main)
+    frappe.db.commit()
+
+    # Tag cost centers with tenant_id so TenantAwareDB can find them
+    for cc in (cc_root, cc_main):
+        frappe.db.set_value("Cost Center", cc, "tenant_id", TEST_TENANT_ID)
     frappe.db.commit()
 
     return {
@@ -312,6 +334,8 @@ def mock_app(tenant_db, test_company):
         frappe.get_doc({
             "doctype": "DefaultValue",
             "parent": "Administrator",
+            "parenttype": "User",
+            "parentfield": "defaults",
             "defkey": "company",
             "defvalue": test_company,
         }).insert(ignore_permissions=True)
@@ -326,6 +350,14 @@ def mock_app(tenant_db, test_company):
 
     app_mock = MagicMock()
     app_mock.tenant_db = tenant_db
+
+    # Ensure the module-level _registry in frappe_microservice.controller points
+    # at the shared frappe._microservice_registry so controller hooks can find
+    # the PurchaseInvoice controller class (server.py normally does this).
+    import frappe_microservice.controller as _ctrl_module
+    from frappe_microservice.controller import setup_controllers as _setup_controllers
+    _ctrl_module._registry = _ctrl_module.get_controller_registry()
+    _setup_controllers(app_mock, controllers_directory=os.path.join(EXPENSE_MOUNT, "controllers"))
 
     with patch("frappe_microservice.get_app", return_value=app_mock), \
          patch("expense_tracker.api.get_app", return_value=app_mock), \

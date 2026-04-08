@@ -7,12 +7,13 @@ Feature: Expense draft and confirm submit
   These scenarios require a running expense-service and a valid session.
 
   Environment (Cypress env or shell):
-    EXPENSE_SERVICE_URL — default http://localhost:9004
-    EXPENSE_TEST_SID    — Frappe session id (Cookie sid + X-Frappe-SID)
+    EXPENSE_SERVICE_URL  — default http://localhost:9004
+    EXPENSE_FRAPPE_URL   — Frappe login endpoint (default http://localhost:8000)
     EXPENSE_TEST_COMPANY — company name for POST body (optional)
+    ADMIN_PASSWORD       — Administrator password (default "admin")
 
   Background:
-    Given the expense API test session is configured
+    Given I login to the expense service as "Administrator"
 
   Scenario: Create expense stays draft until confirm submit
     When I POST a new Purchase Invoice for expense draft submit with:
