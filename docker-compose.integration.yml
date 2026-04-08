@@ -1,0 +1,11 @@
+services:
+  dev-central-site:
+    image: docker.io/vyogo/erpnext:sne-version-16
+    ports:
+      - "8080:8000"
+    command: ["/usr/libexec/s2i/run"]
+    volumes:
+      # expense-service source (controllers/, expense_tracker/, tests/)
+      - .:/mnt/expense
+      # frappe-microservice-lib source — installed via pip inside the container
+      - ../frappe-microservice-lib:/mnt/lib
