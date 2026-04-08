@@ -136,23 +136,40 @@ jobs:
               --rootdir=/mnt/expense \
               -v --tb=short
 
-      - name: Seed Administrator tenant_id for Cypress HTTP tests
+      - name: Seed Administrator tenant_id and company default for Cypress HTTP tests
         run: |
           docker compose -f docker-compose.integration.yml exec -T dev-central-site \
             /home/frappe/frappe-bench/env/bin/python - << 'PYEOF'
           import frappe
           frappe.init(site='dev.localhost', sites_path='/home/frappe/frappe-bench/sites')
           frappe.connect()
+          TEST_TENANT_ID = "expense-integ-tenant-001"
+          TEST_COMPANY   = "_Test Expense Integ Co"
           cols = frappe.db.sql("SHOW COLUMNS FROM `tabUser` LIKE 'tenant_id'", as_list=True)
           if not cols:
               frappe.db.sql("ALTER TABLE `tabUser` ADD COLUMN `tenant_id` VARCHAR(140) DEFAULT NULL")
               print("Added tenant_id column to tabUser")
           frappe.db.sql(
               "UPDATE `tabUser` SET tenant_id = %s WHERE name = 'Administrator'",
-              ("expense-integ-tenant-001",),
+              (TEST_TENANT_ID,),
           )
+          existing = frappe.db.get_value(
+              "DefaultValue", {"parent": "Administrator", "defkey": "company"}, "name"
+          )
+          if existing:
+              frappe.db.set_value("DefaultValue", existing, "defvalue", TEST_COMPANY)
+          else:
+              frappe.get_doc({
+                  "doctype": "DefaultValue",
+                  "parent": "Administrator",
+                  "parenttype": "User",
+                  "parentfield": "defaults",
+                  "defkey": "company",
+                  "defvalue": TEST_COMPANY,
+              }).insert(ignore_permissions=True)
           frappe.db.commit()
-          print("Administrator.tenant_id = expense-integ-tenant-001")
+          print(f"Administrator.tenant_id = {TEST_TENANT_ID}")
+          print(f"Administrator default company = {TEST_COMPANY}")
           frappe.destroy()
           PYEOF
 

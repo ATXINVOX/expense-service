@@ -128,13 +128,15 @@ fi
 # 6a. Seed Administrator's tenant_id so secure_route can resolve the tenant
 #     for Cypress API tests (get_user_tenant_id reads tabUser.tenant_id).
 # ---------------------------------------------------------------------------
-log "Seeding Administrator tenant_id for Cypress HTTP tests"
+log "Seeding Administrator tenant_id and company default for Cypress HTTP tests"
 $COMPOSE -f "$COMPOSE_FILE" exec -T "$SERVICE" "$PYTHON" - << 'PYEOF'
 import frappe
 frappe.init(site='dev.localhost', sites_path='/home/frappe/frappe-bench/sites')
 frappe.connect()
 TEST_TENANT_ID = "expense-integ-tenant-001"
-# Add tenant_id column to tabUser if not present (same pattern used for other doctypes)
+TEST_COMPANY   = "_Test Expense Integ Co"
+
+# Add tenant_id column to tabUser if not present
 cols = frappe.db.sql("SHOW COLUMNS FROM `tabUser` LIKE 'tenant_id'", as_list=True)
 if not cols:
     frappe.db.sql("ALTER TABLE `tabUser` ADD COLUMN `tenant_id` VARCHAR(140) DEFAULT NULL")
@@ -143,8 +145,26 @@ frappe.db.sql(
     "UPDATE `tabUser` SET tenant_id = %s WHERE name = 'Administrator'",
     (TEST_TENANT_ID,),
 )
+
+# Ensure Administrator has a default company so _resolve_company() works in HTTP context
+existing = frappe.db.get_value(
+    "DefaultValue", {"parent": "Administrator", "defkey": "company"}, "name"
+)
+if existing:
+    frappe.db.set_value("DefaultValue", existing, "defvalue", TEST_COMPANY)
+else:
+    frappe.get_doc({
+        "doctype": "DefaultValue",
+        "parent": "Administrator",
+        "parenttype": "User",
+        "parentfield": "defaults",
+        "defkey": "company",
+        "defvalue": TEST_COMPANY,
+    }).insert(ignore_permissions=True)
+
 frappe.db.commit()
 print(f"  Administrator.tenant_id = {TEST_TENANT_ID}")
+print(f"  Administrator default company = {TEST_COMPANY}")
 frappe.destroy()
 PYEOF
 
