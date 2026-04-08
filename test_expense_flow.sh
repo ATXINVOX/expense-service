@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ─── Single-expense flow (draft → update → submit → optional cancel → optional delete) ───
+# ─── Single-expense flow (draft → update → submit → optional delete) ───
 #
 # Env overrides:
 #   EXPENSE_BASE_URL          API root (default prompts or http://localhost:8000)
@@ -12,20 +12,15 @@ set -euo pipefail
 #   EXPENSE_ITEM_GROUP        default Groceries (or suffixed if UNIQUE_ITEMS=1)
 #   EXPENSE_ITEM_CODE         default Milk 2L
 #   EXPENSE_UNIQUE_ITEMS=1    append e2e-<ts>-<rand>-$$ to item group/code (default 1; set 0 for prod)
-#   EXPENSE_CANCEL=1          after submit, call cancel API (non-interactive)
-#   EXPENSE_CANCEL=0          skip cancel and do not prompt (good for CI / e2e)
-#   EXPENSE_DELETE=1          DELETE invoice + GET expect 404 (see below).
-#   EXPENSE_STOP_BEFORE_SUBMIT=1  exit after PUT (step 5); pair with EXPENSE_DELETE=1 to delete draft.
-#                             Without this, DELETE runs after cancel (step 8) and often fails if still submitted.
+#   EXPENSE_DELETE=1          DELETE invoice + GET expect 404 (submitted invoices are auto-cancelled then deleted).
+#   EXPENSE_STOP_BEFORE_SUBMIT=1  exit after PUT (step 5); pair with EXPENSE_DELETE=1 to delete draft only.
 #   EXPENSE_SKIP_ITEM_SETUP=1 skip POST Item Group / Item (use when they already exist)
-#   EXPENSE_INCLUDE_EXTRAS=1  also run: reject cancel-while-draft, list, dashboard
-#   EXPENSE_EXTENDED_GET_DELETE=1  after main flow: explicit GET submitted + DELETE try (submitted);
-#                             second draft PI → GET draft → DELETE → GET 404. With STOP_BEFORE_SUBMIT,
+#   EXPENSE_INCLUDE_EXTRAS=1  also run: list, dashboard
+#   EXPENSE_EXTENDED_GET_DELETE=1  after main flow: GET submitted + DELETE + verify 404;
+#                             optional second draft PI demo if needed. With STOP_BEFORE_SUBMIT,
 #                             runs GET+DELETE on the main draft before exit.
 #
 # GET by id: steps 4 (after create) and 7 (after submit) — GET /api/resource/Purchase%20Invoice/{ENC}
-#
-# Optional cancel (if EXPENSE_CANCEL unset): TTY prompts "Cancel after submit? [y/N]"
 
 # ─── Config ───────────────────────────────────────────────────────────
 if [[ -n "${EXPENSE_BASE_URL:-}" ]]; then
@@ -233,16 +228,6 @@ echo "HTTP $GET0_HTTP"; echo "$GET0_BODY" | python3 -m json.tool 2>/dev/null || 
 [[ "$GET0_HTTP" -ge 200 && "$GET0_HTTP" -lt 300 ]] || exit 1
 echo ""
 
-if [[ "${EXPENSE_INCLUDE_EXTRAS:-}" == "1" ]]; then
-  echo "──── 4b. POST cancel on draft (expect 400) ────"
-  CAN_D=$(PINV_NAME="$PINV_NAME" python3 -c 'import json,os; print(json.dumps({"name": os.environ["PINV_NAME"]}))')
-  R=$(curl -s -w "\n%{http_code}" -X POST \
-    "$BASE_URL/api/method/expense_tracker.api.cancel_purchase_invoice" \
-    "${HEADERS[@]}" -d "$CAN_D")
-  echo "HTTP $(echo "$R" | tail -1)"; echo "$R" | sed '$d' | python3 -m json.tool 2>/dev/null || echo "$R" | sed '$d'
-  echo ""
-fi
-
 echo "──── 5. PUT update draft (remarks) ────"
 PATCH_REMARKS="${EXPENSE_PATCH_REMARKS:-Grocery for office pantry — updated before submit}"
 PUT_PAYLOAD=$(PATCH_REMARKS="$PATCH_REMARKS" python3 -c 'import json,os; print(json.dumps({"remarks": os.environ["PATCH_REMARKS"]}))')
@@ -259,7 +244,7 @@ echo "✓ Updated"
 echo ""
 
 if [[ "${EXPENSE_STOP_BEFORE_SUBMIT:-}" == "1" ]]; then
-  echo "──── STOP_BEFORE_SUBMIT: skipping submit / cancel ────"
+  echo "──── STOP_BEFORE_SUBMIT: skipping submit / final delete ────"
   if [[ "${EXPENSE_EXTENDED_GET_DELETE:-}" == "1" ]]; then
     run_get_pinv_by_id "$ENC" "main invoice (draft)" || exit 1
     run_delete_pinv_and_verify "$ENC" || { echo "FAILED: draft DELETE or post-delete GET"; exit 1; }
@@ -278,7 +263,7 @@ fi
 echo "──── 6. POST submit (draft → submitted) ────"
 SUB_PAYLOAD=$(PINV_NAME="$PINV_NAME" python3 -c 'import json,os; print(json.dumps({"name": os.environ["PINV_NAME"]}))')
 SUB_RESP=$(curl -s -w "\n%{http_code}" -X POST \
-  "$BASE_URL/api/method/expense_tracker.api.submit_purchase_invoice" \
+  "$BASE_URL/api/method/frappe.client.submit" \
   "${HEADERS[@]}" \
   -d "$SUB_PAYLOAD")
 SUB_HTTP=$(echo "$SUB_RESP" | tail -1)
@@ -299,34 +284,6 @@ echo "HTTP $GET1_HTTP"
 echo "$GET1_BODY" | python3 -m json.tool 2>/dev/null || echo "$GET1_BODY"
 echo ""
 
-DO_CANCEL=false
-if [[ "${EXPENSE_CANCEL:-}" == "1" ]]; then
-  DO_CANCEL=true
-elif [[ "${EXPENSE_CANCEL:-}" == "0" ]]; then
-  :
-elif [[ -t 0 ]]; then
-  read -rp "Cancel this submitted expense? [y/N]: " _ans || true
-  [[ "${_ans,,}" == y* ]] && DO_CANCEL=true
-fi
-
-if [[ "$DO_CANCEL" == true ]]; then
-  echo "──── 8. POST cancel_purchase_invoice ────"
-  CAN_P=$(PINV_NAME="$PINV_NAME" python3 -c 'import json,os; print(json.dumps({"name": os.environ["PINV_NAME"]}))')
-  CAN_R=$(curl -s -w "\n%{http_code}" -X POST \
-    "$BASE_URL/api/method/expense_tracker.api.cancel_purchase_invoice" \
-    "${HEADERS[@]}" \
-    -d "$CAN_P")
-  CAN_HTTP=$(echo "$CAN_R" | tail -1)
-  CAN_BODY=$(echo "$CAN_R" | sed '$d')
-  echo "HTTP $CAN_HTTP"
-  echo "$CAN_BODY" | python3 -m json.tool 2>/dev/null || echo "$CAN_BODY"
-  [[ "$CAN_HTTP" -ge 200 && "$CAN_HTTP" -lt 300 ]] || { echo "FAILED: cancel"; exit 1; }
-  echo "✓ Cancelled"
-else
-  echo "──── 8. Skip cancel (set EXPENSE_CANCEL=1 or answer y next time) ────"
-fi
-echo ""
-
 if [[ "${EXPENSE_EXTENDED_GET_DELETE:-}" == "1" ]]; then
   echo "═══════════════════════════════════════════════════════════════"
   echo "  EXTENDED: GET/DELETE by id (submitted + draft)"
@@ -336,7 +293,7 @@ if [[ "${EXPENSE_EXTENDED_GET_DELETE:-}" == "1" ]]; then
   echo "──── Ext 1. GET by id (main invoice — expect submitted) ────"
   run_get_pinv_by_id "$ENC" "main after submit (docstatus 1)" || exit 1
 
-  echo "──── Ext 2. DELETE by id (submitted — often blocked by ERPNext) ────"
+  echo "──── Ext 2. DELETE by id (submitted — auto-cancel then delete) ────"
   SUBDEL=$(curl -s -w "\n%{http_code}" -X DELETE \
     "$BASE_URL/api/resource/Purchase%20Invoice/$ENC" \
     "${HEADERS[@]}")
@@ -345,7 +302,7 @@ if [[ "${EXPENSE_EXTENDED_GET_DELETE:-}" == "1" ]]; then
   echo "HTTP $SUBDEL_HTTP"
   echo "$SUBDEL_BODY" | python3 -m json.tool 2>/dev/null || echo "$SUBDEL_BODY"
   if [[ "$SUBDEL_HTTP" -ge 200 && "$SUBDEL_HTTP" -lt 300 ]]; then
-    echo "✓ Submitted invoice was deletable (unusual for ERPNext)."
+    echo "✓ Submitted invoice deleted."
     echo "──── Ext 2b. GET after delete main (expect 404) ────"
     GONE=$(curl -s -w "\n%{http_code}" -X GET \
       "$BASE_URL/api/resource/Purchase%20Invoice/$ENC" \
@@ -355,7 +312,7 @@ if [[ "${EXPENSE_EXTENDED_GET_DELETE:-}" == "1" ]]; then
     echo ""
     echo "⚠ Main invoice removed; skipping Ext 3 second draft demo."
   else
-    echo "⚠ Submitted DELETE returned HTTP $SUBDEL_HTTP (typical — ERPNext keeps submitted docs)."
+    echo "⚠ Submitted DELETE returned HTTP $SUBDEL_HTTP (unexpected — check server logs)."
     echo ""
     echo "──── Ext 3. Second PI (draft only) — POST → GET → DELETE → GET 404 ────"
     EXT_JSON=$(COMPANY="$COMPANY" ITEM_GROUP="$ITEM_GROUP" ITEM_CODE="$ITEM_CODE" SUPPLIER="$SUPPLIER" POSTING_DATE="$POSTING_DATE" python3 <<'PY'
@@ -399,8 +356,7 @@ if [[ "${EXPENSE_DELETE:-}" == "1" ]] && [[ "${EXPENSE_EXTENDED_GET_DELETE:-}" !
     :
   else
     echo "FAILED: DELETE or post-delete GET."
-    echo "  Hint: ERPNext usually allows DELETE only on draft — use"
-    echo "  EXPENSE_STOP_BEFORE_SUBMIT=1 EXPENSE_DELETE=1 ... to delete after PUT without submitting."
+    echo "  Hint: use EXPENSE_STOP_BEFORE_SUBMIT=1 EXPENSE_DELETE=1 ... to delete a draft only."
     exit 1
   fi
 elif [[ "${EXPENSE_EXTENDED_GET_DELETE:-}" != "1" ]]; then
@@ -434,7 +390,7 @@ echo 'curl -s -X GET "${BASE}/api/resource/Purchase%20Invoice/${ENC}" \'
 echo '  -H "Accept: application/json" -H "X-Requested-With: XMLHttpRequest" \'
 echo '  -H "X-Frappe-SID: ${SID}" -H "Cookie: sid=${SID}"'
 echo ""
-echo "# DELETE one (draft usually OK; submitted may fail):"
+echo "# DELETE one (draft, cancelled, or submitted — submitted is auto-cancelled first):"
 echo 'curl -s -X DELETE "${BASE}/api/resource/Purchase%20Invoice/${ENC}" \'
 echo '  -H "Accept: application/json" -H "X-Requested-With: XMLHttpRequest" \'
 echo '  -H "X-Frappe-SID: ${SID}" -H "Cookie: sid=${SID}"'
@@ -447,14 +403,7 @@ echo '  -H "X-Frappe-SID: ${SID}" -H "Cookie: sid=${SID}" \'
 echo "  -d '{\"remarks\":\"Updated remarks\"}'"
 echo ""
 echo "# SUBMIT (draft → Submitted, docstatus 1):"
-echo 'curl -s -X POST "${BASE}/api/method/expense_tracker.api.submit_purchase_invoice" \'
-echo '  -H "Accept: application/json" -H "Content-Type: application/json" \'
-echo '  -H "X-Requested-With: XMLHttpRequest" \'
-echo '  -H "X-Frappe-SID: ${SID}" -H "Cookie: sid=${SID}" \'
-echo "  -d '{\"name\":\"NAME\"}'"
-echo ""
-echo "# CANCEL (submitted only, docstatus → 2):"
-echo 'curl -s -X POST "${BASE}/api/method/expense_tracker.api.cancel_purchase_invoice" \'
+echo 'curl -s -X POST "${BASE}/api/method/frappe.client.submit" \'
 echo '  -H "Accept: application/json" -H "Content-Type: application/json" \'
 echo '  -H "X-Requested-With: XMLHttpRequest" \'
 echo '  -H "X-Frappe-SID: ${SID}" -H "Cookie: sid=${SID}" \'

@@ -25,7 +25,7 @@ It uses a strict Frappe-style API surface and keeps the mobile payloads minimal:
 - dashboard data is computed by `get_dashboard_summary` as a custom endpoint
 
 ### Important behavior
-- New `Purchase Invoice` rows stay **Draft** until the user confirms. Typical flow: **POST** minimal body to `/api/resource/Purchase Invoice` (draft), optional **PUT** `/api/resource/Purchase Invoice/{name}` to update fields (e.g. `remarks`), then **POST** `/api/method/expense_tracker.api.submit_purchase_invoice` with JSON `{"name":"<invoice name>"}` (or `invoice_name`) to set **Submitted** (`docstatus` 1). See `test_expense_flow.sh` for a full curl example.
+- New `Purchase Invoice` rows stay **Draft** until the user confirms. Typical flow: **POST** minimal body to `/api/resource/Purchase Invoice` (draft), optional **PUT** `/api/resource/Purchase Invoice/{name}` to update fields (e.g. `remarks`), then **POST** `/api/method/frappe.client.submit` with JSON `{"name":"<invoice name>"}` (or `invoice_name`, or Frappe-style `{"doc":{"doctype":"Purchase Invoice","name":"..."}}`) to run **real** submit (`docstatus` 1). See `test_expense_flow.sh` for a full curl example.
 - Cost centre is internal and always resolved by service.
 - `Item Group` is used for category-like grouping in the mobile UI.
 - `get_dashboard_summary` does not take a `company` argument.
@@ -71,7 +71,7 @@ Example create payloads:
 
 ### Custom API
 - `GET /api/method/expense_tracker.api.get_dashboard_summary`
-- `POST /api/method/expense_tracker.api.submit_purchase_invoice` — body `{"name":"<Purchase Invoice name>"}` (draft → submitted)
+- `POST /api/method/frappe.client.submit` — body `{"name":"<Purchase Invoice name>"}` or `{"doc":{"doctype":"Purchase Invoice","name":"..."}}` (draft → submitted via Frappe submit)
 - `DELETE /api/resource/Purchase Invoice/{name}` — removes the expense; if still **Submitted**, the service cancels it first (docstatus 2) then deletes (no separate cancel endpoint).
 
 ## Kong
@@ -79,7 +79,7 @@ Example create payloads:
 - `/api/resource/Purchase Invoice`
 - `/api/resource/Item Group`
 - `/api/method/expense_tracker.api.get_dashboard_summary`
-- `/api/method/expense_tracker.api.submit_purchase_invoice`
+- `/api/method/frappe.client.submit`
 
 ## Contract notes for mobile
 - Supplier creation is transparent: sending a new supplier name will create the `Supplier` record.
@@ -94,7 +94,7 @@ Example create payloads:
 
 | File | What it covers |
 |------|---------------|
-| `tests/test_purchase_invoice.py` | Controller enrichment, custom fields, dashboard summary, submit, delete |
+| `tests/test_purchase_invoice.py` | Controller enrichment, custom fields, dashboard summary, `frappe.client.submit` wrapper, `delete_purchase_invoice` (cancel-if-submitted then delete) |
 | `tests/test_server.py` | Registered resources |
 | `tests/test_document_model.py` | Document-model correctness — proves child rows are `FakeChildDocument` instances, not plain dicts, and that `save()` crashes when they are |
 
