@@ -56,10 +56,19 @@ jobs:
           docker cp ms-extract:/opt/venv/lib/python3.14/site-packages/frappe_microservice \
             /tmp/ms-src/frappe_microservice
           docker rm ms-extract
+          # Write setup files via Python to avoid heredoc indentation problems.
+          python3 - << 'PYEOF'
+          import pathlib
+          base = pathlib.Path("/tmp/ms-src")
+          (base / "setup.cfg").write_text(
+              "[metadata]\nname = frappe-microservice\nversion = 1.4.0\n"
+              "[options]\npackages = find:\ninstall_requires =\n"
+              "    flask\n    flasgger\n    gunicorn\n    pyjwt\n    requests\n"
+          )
+          (base / "setup.py").write_text("from setuptools import setup\nsetup()\n")
+          PYEOF
 
       - name: Start integration container
-        # MS_LIB_PATH is unused for the install in CI but the volume bind must
-        # exist; point it at the extracted src dir.
         run: MS_LIB_PATH=/tmp/ms-src docker compose -f docker-compose.integration.yml up -d
 
       - name: Wait for Frappe site
@@ -103,15 +112,8 @@ jobs:
 
       - name: Install frappe-microservice lib and test deps
         run: |
-          # Copy frappe_microservice directly into the bench venv site-packages.
-          # Flask and other Frappe deps are already in the bench venv.
-          CONTAINER_ID=$(docker compose -f docker-compose.integration.yml ps -q dev-central-site)
-          SITE_PKG=$(docker compose -f docker-compose.integration.yml exec -T dev-central-site \
-            /home/frappe/frappe-bench/env/bin/python \
-            -c "import site; print(site.getsitepackages()[0])")
-          docker cp /tmp/ms-src/frappe_microservice "$CONTAINER_ID:$SITE_PKG/"
           docker compose -f docker-compose.integration.yml exec -T dev-central-site \
-            /home/frappe/frappe-bench/env/bin/pip install --quiet pytest pytest-cov
+            /home/frappe/frappe-bench/env/bin/pip install --quiet /mnt/lib pytest pytest-cov
 
       - name: Run Python integration tests with coverage
         run: |
