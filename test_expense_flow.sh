@@ -409,4 +409,3 @@ echo '  -H "X-Requested-With: XMLHttpRequest" \'
 echo '  -H "X-Frappe-SID: ${SID}" -H "Cookie: sid=${SID}" \'
 echo "  -d '{\"name\":\"NAME\"}'"
 echo ""
-
