@@ -734,6 +734,28 @@ def ensure_purchase_invoice_submit_prereqs(company: str, supplier: str | None) -
     clear_company_currency_cache(company)
 
 
+def _ensure_supplier_group(group_name: str) -> str:
+    """Ensure a Supplier Group row exists; create if missing.
+
+    The signup-service skips the ERPNext setup wizard, so standard fixtures
+    like 'All Supplier Groups' may not exist yet.
+    """
+    if frappe.db.exists("Supplier Group", group_name):
+        return group_name
+    try:
+        frappe.db.sql("""
+            INSERT IGNORE INTO `tabSupplier Group`
+            (name, supplier_group_name, is_group, lft, rgt,
+             creation, modified, modified_by, owner, docstatus, idx)
+            VALUES (%s, %s, 1, 1, 2, NOW(), NOW(),
+                    'Administrator', 'Administrator', 0, 0)
+        """, (group_name, group_name))
+        frappe.db.commit()
+    except Exception as exc:
+        logger.warning("_ensure_supplier_group(%r): %s", group_name, exc)
+    return group_name
+
+
 def _default_supplier_group():
     supplier_group = None
     for filters in (
@@ -792,7 +814,9 @@ def _create_supplier(
     default_currency: str | None = None,
 ):
     if not supplier_group:
-        supplier_group = _normalize_name("General", fallback="General")
+        supplier_group = "All Supplier Groups"
+
+    _ensure_supplier_group(supplier_group)
 
     base_name = _normalize_name(supplier_name, fallback="Supplier", max_length=95)
     if not base_name:
@@ -816,21 +840,54 @@ def _create_supplier(
 
     try:
         doc = _app_db().insert_doc("Supplier", supplier_payload, ignore_permissions=True)
-        # Commit immediately so ERPNext link validation (run during Purchase Invoice
-        # doc.insert()) can find this record on the same DB connection.
         frappe.db.commit()
         return doc.name
     except frappe.DuplicateEntryError:
-        # Row exists for another tenant — tenant-aware get_value missed it.
-        # Safe to reuse: the name is globally unique and ERPNext link validation
-        # only checks the primary key.
         frappe.db.rollback()
         return name
+
+
+def _ensure_root_item_group():
+    """Ensure the 'All Item Groups' root exists (setup wizard normally creates it)."""
+    if frappe.db.exists("Item Group", "All Item Groups"):
+        return
+    try:
+        frappe.db.sql("""
+            INSERT IGNORE INTO `tabItem Group`
+            (name, item_group_name, is_group, lft, rgt,
+             creation, modified, modified_by, owner, docstatus, idx)
+            VALUES ('All Item Groups', 'All Item Groups', 1, 1, 2,
+                    NOW(), NOW(), 'Administrator', 'Administrator', 0, 0)
+        """)
+        frappe.db.commit()
+    except Exception as exc:
+        logger.warning("_ensure_root_item_group: %s", exc)
+
+
+def _ensure_uom(uom_name: str) -> str:
+    """Ensure a UOM row exists (setup wizard normally creates these)."""
+    if frappe.db.exists("UOM", uom_name):
+        return uom_name
+    try:
+        frappe.db.sql("""
+            INSERT IGNORE INTO `tabUOM`
+            (name, uom_name, enabled, must_be_whole_number,
+             creation, modified, modified_by, owner, docstatus, idx)
+            VALUES (%s, %s, 1, 1, NOW(), NOW(),
+                    'Administrator', 'Administrator', 0, 0)
+        """, (uom_name, uom_name))
+        frappe.db.commit()
+    except Exception as exc:
+        logger.warning("_ensure_uom(%r): %s", uom_name, exc)
+    return uom_name
 
 
 def _ensure_item_group(group_name: str) -> str:
     """Ensure the Item Group exists; auto-create under 'All Item Groups' if missing."""
     group_name = str(group_name).strip() if group_name else "All Item Groups"
+
+    _ensure_root_item_group()
+
     if not group_name or group_name == "All Item Groups":
         return "All Item Groups"
 
@@ -863,6 +920,7 @@ def _resolve_item_code(item_name: str, item_group: str) -> str:
         return existing
 
     resolved_group = _ensure_item_group(item_group)
+    _ensure_uom("Nos")
 
     try:
         doc = _app_db().insert_doc("Item", {
