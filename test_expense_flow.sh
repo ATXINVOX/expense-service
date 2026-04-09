@@ -260,7 +260,7 @@ if [[ "${EXPENSE_STOP_BEFORE_SUBMIT:-}" == "1" ]]; then
   exit 0
 fi
 
-echo "──── 6. POST submit (draft → submitted) ────"
+echo "──── 6. POST submit (draft → submitted) — api/method/frappe.client.submit ────"
 SUB_PAYLOAD=$(PINV_NAME="$PINV_NAME" python3 -c 'import json,os; print(json.dumps({"name": os.environ["PINV_NAME"]}))')
 SUB_RESP=$(curl -s -w "\n%{http_code}" -X POST \
   "$BASE_URL/api/method/frappe.client.submit" \
