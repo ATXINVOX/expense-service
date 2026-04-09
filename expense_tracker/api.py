@@ -6,7 +6,13 @@ from datetime import date, datetime
 import frappe
 from frappe_microservice import get_app
 
-from controllers.purchase_invoice import _expense_title
+from controllers.purchase_invoice import (
+    _company_default_currency,
+    _expense_title,
+    clear_account_cache_for_company,
+    clear_company_currency_cache,
+    ensure_purchase_invoice_submit_prereqs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -139,6 +145,38 @@ def _resolve_company():
     ) or None
 
 
+def _log_pi_currency_debug(pinv_name: str) -> None:
+    """Log PI fields + ERPNext company currency when submit fails with FX-style errors (e.g. AUD→None)."""
+    pi = frappe.get_doc("Purchase Invoice", pinv_name)
+    gcc = None
+    try:
+        import erpnext
+
+        gcc = erpnext.get_company_currency(pi.company) if pi.company else None
+    except Exception as exc:
+        gcc = f"<err {exc!r}>"
+    co_row = None
+    if pi.company:
+        co_row = frappe.db.get_value(
+            "Company",
+            pi.company,
+            ["default_currency", "default_payable_account"],
+            as_dict=True,
+        )
+    logger.warning(
+        "SUBMIT PI currency debug name=%r pi.company=%r pi.currency=%r pi.conversion_rate=%r "
+        "pi.credit_to=%r pi.party_account_currency=%r erpnext.get_company_currency=%r tabCompany=%r",
+        pinv_name,
+        pi.company,
+        pi.currency,
+        pi.conversion_rate,
+        getattr(pi, "credit_to", None),
+        getattr(pi, "party_account_currency", None),
+        gcc,
+        co_row,
+    )
+
+
 @get_app().secure_route("/api/method/frappe.client.submit", methods=["POST"])
 def frappe_client_submit(user):
     """Submit a document on this site.
@@ -159,6 +197,7 @@ def frappe_client_submit(user):
     from flask import request
 
     name_raw = ""
+    last_pi_submit = None
     try:
         payload = request.get_json(silent=True) or {}
         doc_arg = payload.get("doc")
@@ -199,6 +238,7 @@ def frappe_client_submit(user):
                 [
                     "docstatus",
                     "company",
+                    "supplier",
                     "expense_item_name",
                     "expense_items_count",
                     "remarks",
@@ -224,6 +264,18 @@ def frappe_client_submit(user):
                     "PermissionError",
                 )
 
+            # ERPNext get_company_currency(doc.company) drives conversion_rate / exchange lookups.
+            # Empty PI.company → None "to" currency (AUD→None) even when Company master is AUD.
+            co = inv_company or company
+            if not inv_company:
+                frappe.db.set_value(
+                    "Purchase Invoice",
+                    name,
+                    "company",
+                    co,
+                    update_modified=False,
+                )
+
             docstatus = int(row.get("docstatus") or 0)
             if docstatus != 0:
                 status_label = "Submitted" if docstatus == 1 else "Cancelled"
@@ -235,6 +287,15 @@ def frappe_client_submit(user):
                 )
 
             _app_db().get_doc("Purchase Invoice", name, verify_tenant=True)
+            last_pi_submit = name
+
+            # Round-off CC, payable account_currency, supplier party currency — avoids
+            # submit-time validation errors on partially provisioned tenants.
+            sup = (row.get("supplier") or "").strip() or None
+            ensure_purchase_invoice_submit_prereqs(co, sup)
+            # Flush + drop stale Account cache (get_cached_value used for party_account_currency).
+            frappe.db.commit()
+            clear_account_cache_for_company(co)
 
             expense_title = _expense_title(
                 row.get("expense_item_name"),
@@ -248,6 +309,30 @@ def frappe_client_submit(user):
 
             doc = frappe.get_doc("Purchase Invoice", name)
             doc.flags.ignore_permissions = True
+
+            # Defence-in-depth: ensure the PI itself has currency & conversion_rate
+            # and clear the company-currency cache one final time so ERPNext's
+            # get_company_currency() can never return None during GL entry creation.
+            if not doc.get("company"):
+                doc.company = co
+            if not doc.get("currency"):
+                doc.currency = _company_default_currency(co)
+            if not doc.get("conversion_rate"):
+                doc.conversion_rate = 1.0
+            try:
+                if hasattr(doc, "set_missing_values"):
+                    doc.set_missing_values(for_validate=True)
+            except Exception as exc:
+                logger.info("SUBMIT: set_missing_values(for_validate=True) skipped: %s", exc)
+            clear_company_currency_cache(co)
+            # Force request-level cache used by erpnext.get_company_currency() (must match doc.company).
+            cur_master = frappe.db.get_value("Company", co, "default_currency")
+            if not (cur_master and str(cur_master).strip()):
+                cur_master = _company_default_currency(co)
+            if not getattr(frappe.flags, "company_currency", None):
+                frappe.flags.company_currency = {}
+            frappe.flags.company_currency[co] = str(cur_master).strip()
+
             doc.submit()
             frappe.db.commit()
             logger.info("SUBMIT: success name=%s docstatus=%s user=%s", name, doc.docstatus, user)
@@ -270,6 +355,11 @@ def frappe_client_submit(user):
         return _build_error("You do not have permission to submit this document", 403, "PermissionError")
 
     except frappe.ValidationError as e:
+        if last_pi_submit and "exchange rate" in str(e).lower():
+            try:
+                _log_pi_currency_debug(last_pi_submit)
+            except Exception:
+                logger.exception("SUBMIT: PI currency debug failed for %r", last_pi_submit)
         logger.warning("SUBMIT: validation error name=%r user=%s: %s", name_raw, user, e)
         return _build_error(f"Invalid input: {e}", 400, "ValidationError")
 

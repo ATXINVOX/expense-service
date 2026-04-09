@@ -10,12 +10,28 @@ from frappe_microservice.controller import DocumentController
 logger = logging.getLogger(__name__)
 
 
+def _erpnext_accounts_utils():
+    """Return ERPNext accounts utils when the app is installed (runtime image), else None.
+
+    ERPNext is not vendored in this repo; the microservice bench still loads it via pip.
+    Prefer these helpers over duplicating fiscal-year and company-scoped accounting logic.
+    """
+    try:
+        import erpnext.accounts.utils as utils  # type: ignore[import-untyped]
+
+        return utils
+    except Exception:
+        return None
+
+
 def _app_db():
     return get_app().tenant_db
 
 
 DEFAULT_GST_TEMPLATE = "AU GST 10%"
 GST_MARKER = "gst"
+# Australian expense product: all fallbacks and back-filled master data use AUD only.
+DEFAULT_FALLBACK_CURRENCY = "AUD"
 
 EXPENSE_CUSTOM_COLUMNS = [
     ("expense_item_name", "varchar(140)"),
@@ -112,6 +128,21 @@ def _ensure_fiscal_year(posting_date: str | None, company: str):
     fy_start = dt.replace(month=7, day=1) if dt.month >= 7 else dt.replace(year=dt.year - 1, month=7, day=1)
     fy_end = fy_start.replace(year=fy_start.year + 1, month=6, day=30)
     fy_name = f"{fy_start.year}-{fy_end.year}"
+
+    utils = _erpnext_accounts_utils()
+    if utils:
+        try:
+            match = utils.get_fiscal_years(
+                transaction_date=str(dt),
+                company=company,
+                raise_on_missing=False,
+            )
+            if match:
+                first = match[0]
+                if isinstance(first, tuple) and first:
+                    return str(first[0])
+        except Exception as exc:
+            logger.debug("_ensure_fiscal_year: erpnext.get_fiscal_years skipped (%s)", exc)
 
     existing = frappe.db.get_value("Fiscal Year", fy_name, "name")
     if existing:
@@ -261,6 +292,7 @@ def _get_default_expense_account(item_code: str, company: str):
 
     abbr = _company_abbr(company)
     root_name = f"Expenses - {abbr}"
+    cc = _company_default_currency(company)
     if not _app_db().get_value("Account", root_name, "name"):
         _create_system_doc(
             "Account",
@@ -271,6 +303,7 @@ def _get_default_expense_account(item_code: str, company: str):
                 "root_type": "Expense",
                 "report_type": "Profit and Loss",
                 "is_group": 1,
+                "account_currency": cc,
             },
             ignore_mandatory=True,
         )
@@ -288,11 +321,33 @@ def _get_default_expense_account(item_code: str, company: str):
                 "parent_account": root_name,
                 "account_type": "Expense Account",
                 "is_group": 0,
+                "account_currency": cc,
             },
             ignore_mandatory=True,
         )
 
     return account_name
+
+
+def _ensure_company_round_off_cost_center(company: str, cost_center_name: str | None) -> None:
+    """ERPNext requires Company.round_off_cost_center when submitting Purchase Invoice (rounding GL)."""
+    if not cost_center_name:
+        return
+    try:
+        current = _app_db().get_value("Company", company, "round_off_cost_center")
+    except Exception:
+        current = None
+    if current:
+        return
+    try:
+        _app_db().set_value("Company", company, "round_off_cost_center", cost_center_name)
+    except Exception as exc:
+        logger.warning(
+            "ensure round_off_cost_center: could not set Company %r → %r (%s)",
+            company,
+            cost_center_name,
+            exc,
+        )
 
 
 def _get_default_cost_center(company: str):
@@ -302,6 +357,7 @@ def _get_default_cost_center(company: str):
         except Exception:
             value = None
         if value:
+            _ensure_company_round_off_cost_center(company, value)
             return value
 
     rows = _app_db().get_all(
@@ -315,6 +371,7 @@ def _get_default_cost_center(company: str):
         # Auto-set the found cost center as the default for the company
         cc_name = _value(rows[0], "name")
         _app_db().set_value("Company", company, "cost_center", cc_name)
+        _ensure_company_round_off_cost_center(company, cc_name)
         return cc_name
 
     abbr = _company_abbr(company)
@@ -342,6 +399,7 @@ def _get_default_cost_center(company: str):
 
     # Set as default for the company
     _app_db().set_value("Company", company, "cost_center", cost_center_name)
+    _ensure_company_round_off_cost_center(company, cost_center_name)
     return cost_center_name
 
 
@@ -479,6 +537,203 @@ def _gst_template_rows(company: str, template_name: str = DEFAULT_GST_TEMPLATE) 
     return rows
 
 
+def _as_plain_str(val: Any) -> str:
+    """Coerce get_value results for currency fields (tests may return MagicMock/dict)."""
+    if val is None:
+        return ""
+    if isinstance(val, str):
+        return val.strip()
+    return ""
+
+
+def _company_default_currency(company: str) -> str:
+    try:
+        cur = _app_db().get_value("Company", company, "default_currency")
+    except Exception:
+        cur = None
+    return _as_plain_str(cur) or DEFAULT_FALLBACK_CURRENCY
+
+
+def _ensure_company_default_currency(company: str) -> None:
+    """Persist Company.default_currency when missing so ERPNext get_company_currency() is never None."""
+    if not company:
+        return
+    if _as_plain_str(_app_db().get_value("Company", company, "default_currency")):
+        return
+    try:
+        _app_db().set_value("Company", company, "default_currency", DEFAULT_FALLBACK_CURRENCY)
+        # erpnext.get_company_currency() memoizes None in frappe.flags.company_currency — clear it.
+        cached = getattr(frappe.flags, "company_currency", None)
+        if isinstance(cached, dict):
+            cached.pop(company, None)
+        frappe.clear_document_cache("Company", company)
+    except Exception as exc:
+        logger.warning(
+            "ensure_company_default_currency: could not set Company %r → %s (%s)",
+            company,
+            DEFAULT_FALLBACK_CURRENCY,
+            exc,
+        )
+
+
+def _ensure_supplier_party_currency(supplier: str, company: str) -> None:
+    """ERPNext submit resolves exchange rates using Supplier.default_currency; NULL → 'AUD to None'."""
+    if not supplier or not company:
+        return
+    try:
+        cur = _app_db().get_value("Supplier", supplier, "default_currency")
+    except Exception:
+        cur = None
+    if _as_plain_str(cur):
+        return
+    cc = _company_default_currency(company)
+    try:
+        _app_db().set_value("Supplier", supplier, "default_currency", cc)
+    except Exception as exc:
+        logger.warning(
+            "ensure_supplier_party_currency: could not set Supplier %r → %r (%s)",
+            supplier,
+            cc,
+            exc,
+        )
+
+
+def _ensure_default_payable_account_currency(company: str) -> None:
+    """Payable Account.account_currency must match company currency or submit looks up AUD→None."""
+    if not company:
+        return
+    try:
+        payable = _app_db().get_value("Company", company, "default_payable_account")
+    except Exception:
+        payable = None
+    if not payable:
+        return
+    try:
+        ac = _app_db().get_value("Account", payable, "account_currency")
+    except Exception:
+        ac = None
+    if _as_plain_str(ac):
+        return
+    cc = _company_default_currency(company)
+    try:
+        _app_db().set_value("Account", payable, "account_currency", cc)
+    except Exception as exc:
+        logger.warning(
+            "ensure_default_payable_account_currency: could not set Account %r (%s)",
+            payable,
+            exc,
+        )
+
+
+def clear_company_currency_cache(company: str) -> None:
+    """Clear all ERPNext company-currency caches so get_company_currency() re-reads from DB.
+
+    Must run unconditionally before doc.submit() — even when Company.default_currency
+    is already 'AUD' in the DB — because erpnext.get_company_currency() caches via
+    frappe.flags.company_currency (request-level) and frappe.db.get_value(cache=True)
+    (Redis document cache).  If any earlier code path loaded the Company doc (e.g.
+    set_value for cost_center, round_off_cost_center) and the doc-cache snapshot
+    happened to have default_currency = NULL (transient state or SQL not yet visible),
+    the cached None persists for the rest of the request → 'AUD to None'.
+    """
+    if not company:
+        return
+    # 1. Request-level dict used by erpnext.get_company_currency()
+    cached = getattr(frappe.flags, "company_currency", None)
+    if isinstance(cached, dict):
+        cached.pop(company, None)
+    # 2. Redis document cache for Company and Supplier
+    frappe.clear_document_cache("Company", company)
+
+
+def clear_account_cache_for_company(company: str) -> None:
+    """Invalidate document cache for Account after raw SQL currency patches."""
+    if not company:
+        return
+    try:
+        for acc in frappe.get_all("Account", filters={"company": company}, pluck="name"):
+            frappe.clear_document_cache("Account", acc)
+    except Exception as exc:
+        logger.debug("clear_account_cache_for_company: %s", exc)
+
+
+def _ensure_all_company_accounts_currency(company: str) -> None:
+    """Set account_currency on every company Account row that is still blank.
+
+    Partial provisioning (signup SQL, templates) often leaves Payable / Tax / Expense
+    accounts without account_currency. ERPNext then sets party_account_currency = None
+    and submit fails with 'exchange rate for AUD to None'.
+
+    Uses a two-pronged approach:
+    1. Raw SQL UPDATE to catch ALL rows regardless of tenant_id (fast, covers edge cases).
+    2. Tenant-scoped get_all + set_value to clear individual document caches.
+    """
+    if not company:
+        return
+    cc = _company_default_currency(company)
+
+    # Prong 1: raw SQL — catches accounts with NULL/mismatched tenant_id that the
+    # tenant-scoped query below would miss.
+    try:
+        frappe.db.sql(
+            "UPDATE `tabAccount` SET `account_currency` = %s "
+            "WHERE `company` = %s AND (`account_currency` IS NULL OR `account_currency` = '')",
+            (cc, company),
+        )
+    except Exception as exc:
+        logger.warning(
+            "ensure_all_company_accounts_currency: raw SQL update company=%r (%s)",
+            company,
+            exc,
+        )
+
+    # Prong 2: tenant-scoped loop only to clear the document cache for each account.
+    try:
+        rows = _app_db().get_all(
+            "Account",
+            filters={"company": company},
+            fields=["name", "account_currency"],
+        )
+    except Exception as exc:
+        logger.warning(
+            "ensure_all_company_accounts_currency: list accounts company=%r (%s)",
+            company,
+            exc,
+        )
+        return
+    for row in rows or []:
+        acc_name = _value(row, "name")
+        if not acc_name:
+            continue
+        if not _as_plain_str(_value(row, "account_currency")):
+            try:
+                _app_db().set_value("Account", acc_name, "account_currency", cc)
+            except Exception as exc:
+                logger.warning(
+                    "ensure_all_company_accounts_currency: Account %r (%s)",
+                    acc_name,
+                    exc,
+                )
+
+
+def ensure_purchase_invoice_submit_prereqs(company: str, supplier: str | None) -> None:
+    """Patch master data before doc.submit() so currency / exchange-rate validation passes."""
+    _ensure_company_default_currency(company)
+    _get_default_cost_center(company)
+    _ensure_default_payable_account(company)
+    _ensure_all_company_accounts_currency(company)
+    _ensure_default_payable_account_currency(company)
+    if supplier:
+        _ensure_supplier_party_currency(supplier, company)
+        frappe.clear_document_cache("Supplier", supplier)
+
+    # CRITICAL: unconditionally clear company-currency caches so ERPNext's
+    # get_company_currency() re-reads from DB during doc.submit().
+    # Even though Company.default_currency IS 'AUD' in the DB, earlier
+    # code in the same request may have cached stale values.
+    clear_company_currency_cache(company)
+
+
 def _default_supplier_group():
     supplier_group = None
     for filters in (
@@ -501,21 +756,27 @@ def _default_supplier_group():
     return _value(groups[0], "name") if groups else None
 
 
-def _resolve_supplier_name(supplier_value):
+def _resolve_supplier_name(supplier_value, company: str | None = None):
     supplier_value = str(supplier_value).strip() if supplier_value else None
     if not supplier_value:
         return None
 
+    party_cc = _company_default_currency(company) if company else None
+
     existing = _app_db().get_value("Supplier", supplier_value, "name")
     if existing:
+        if company:
+            _ensure_supplier_party_currency(existing, company)
         return existing
 
     named = _app_db().get_value("Supplier", {"supplier_name": supplier_value}, "name")
     if named:
+        if company:
+            _ensure_supplier_party_currency(named, company)
         return named
 
     supplier_group = _default_supplier_group()
-    return _create_supplier(supplier_value, supplier_group)
+    return _create_supplier(supplier_value, supplier_group, default_currency=party_cc)
 
 
 def _normalize_name(value: str, fallback: str = "Supplier", max_length: int = 100) -> str:
@@ -525,7 +786,11 @@ def _normalize_name(value: str, fallback: str = "Supplier", max_length: int = 10
     return normalized[:max_length]
 
 
-def _create_supplier(supplier_name: str, supplier_group: str | None):
+def _create_supplier(
+    supplier_name: str,
+    supplier_group: str | None,
+    default_currency: str | None = None,
+):
     if not supplier_group:
         supplier_group = _normalize_name("General", fallback="General")
 
@@ -541,12 +806,16 @@ def _create_supplier(supplier_name: str, supplier_group: str | None):
             break
         name = _normalize_name(f"{base_name}-{i}", fallback="Supplier", max_length=95)
 
+    supplier_payload: Dict[str, Any] = {
+        "name": name,
+        "supplier_name": supplier_name,
+        "supplier_group": supplier_group,
+    }
+    if default_currency:
+        supplier_payload["default_currency"] = default_currency
+
     try:
-        doc = _app_db().insert_doc("Supplier", {
-            "name": name,
-            "supplier_name": supplier_name,
-            "supplier_group": supplier_group,
-        }, ignore_permissions=True)
+        doc = _app_db().insert_doc("Supplier", supplier_payload, ignore_permissions=True)
         # Commit immediately so ERPNext link validation (run during Purchase Invoice
         # doc.insert()) can find this record on the same DB connection.
         frappe.db.commit()
@@ -672,22 +941,23 @@ class PurchaseInvoice(DocumentController):
         _set_value(self, "company", company)
         logger.info("before_validate: company=%s", company)
 
+        _ensure_company_default_currency(company)
         # Default currency and conversion_rate from company when not supplied,
         # preventing Frappe's party-account currency mismatch validation error.
         if not _value(self, "currency", None):
-            company_currency = frappe.db.get_value("Company", company, "default_currency") or "USD"
-            _set_value(self, "currency", company_currency)
+            _set_value(self, "currency", _company_default_currency(company))
         if not _value(self, "conversion_rate", None):
             _set_value(self, "conversion_rate", 1.0)
 
         _get_default_cost_center(company)
         _ensure_default_payable_account(company)
+        _ensure_default_payable_account_currency(company)
         _ensure_fiscal_year(_value(self, "posting_date", None), company)
 
         supplier_value = _value(self, "supplier", None)
         if not supplier_value or not str(supplier_value).strip():
             supplier_value = "General Supplier"
-        supplier = _resolve_supplier_name(supplier_value)
+        supplier = _resolve_supplier_name(supplier_value, company)
         if supplier:
             _set_value(self, "supplier", supplier)
             logger.debug("before_validate: supplier=%s", supplier)
