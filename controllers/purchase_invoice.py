@@ -555,23 +555,35 @@ def _company_default_currency(company: str) -> str:
 
 
 def _ensure_company_default_currency(company: str) -> None:
-    """Persist Company.default_currency when missing so ERPNext get_company_currency() is never None."""
+    """Persist Company.default_currency and reporting_currency when missing.
+
+    default_currency: ERPNext get_company_currency() returns None without it.
+    reporting_currency: GL entry set_amount_in_reporting_currency() fails with
+    'Unable to find exchange rate for AUD to None' when NULL.
+    """
     if not company:
         return
-    if _as_plain_str(_app_db().get_value("Company", company, "default_currency")):
+    cur = _as_plain_str(_app_db().get_value("Company", company, "default_currency"))
+    rep = _as_plain_str(_app_db().get_value("Company", company, "reporting_currency"))
+    updates = {}
+    if not cur:
+        updates["default_currency"] = DEFAULT_FALLBACK_CURRENCY
+    if not rep:
+        updates["reporting_currency"] = cur or DEFAULT_FALLBACK_CURRENCY
+    if not updates:
         return
     try:
-        _app_db().set_value("Company", company, "default_currency", DEFAULT_FALLBACK_CURRENCY)
-        # erpnext.get_company_currency() memoizes None in frappe.flags.company_currency — clear it.
+        for field, value in updates.items():
+            _app_db().set_value("Company", company, field, value)
         cached = getattr(frappe.flags, "company_currency", None)
         if isinstance(cached, dict):
             cached.pop(company, None)
         frappe.clear_document_cache("Company", company)
     except Exception as exc:
         logger.warning(
-            "ensure_company_default_currency: could not set Company %r → %s (%s)",
+            "ensure_company_default_currency: could not set Company %r fields %s (%s)",
             company,
-            DEFAULT_FALLBACK_CURRENCY,
+            list(updates.keys()),
             exc,
         )
 
