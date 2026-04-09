@@ -75,6 +75,9 @@ sys.modules["frappe_microservice.controller"] = mock_microservice_controller
 def _configure_frappe_throw():
     """Make frappe.throw raise so frappe_client_submit errors are testable."""
     mock_frappe.ValidationError = type("ValidationError", (Exception,), {})
+    mock_frappe.LinkExistsError = type(
+        "LinkExistsError", (mock_frappe.ValidationError,), {}
+    )
     mock_frappe.DoesNotExistError = type("DoesNotExistError", (Exception,), {})
     mock_frappe.PermissionError = type("PermissionError", (Exception,), {})
 
@@ -889,6 +892,11 @@ def test_delete_purchase_invoice_submitted_cancels_then_deletes():
 
     mock_frappe.db.get_value.side_effect = _gv
 
+    mock_pi = MagicMock()
+    mock_pi.flags = MagicMock()
+    mock_pi.cancel = MagicMock()
+    mock_app.tenant_db.get_doc.return_value = mock_pi
+
     result = delete_purchase_invoice("user@example.com", "ACC-PINV-2026-00001")
 
     assert result == {
@@ -896,13 +904,18 @@ def test_delete_purchase_invoice_submitted_cancels_then_deletes():
         "doctype": "Purchase Invoice",
         "message": "Purchase Invoice deleted",
     }
-    mock_frappe.db.set_value.assert_called_with(
+    mock_app.tenant_db.get_doc.assert_called_once_with(
+        "Purchase Invoice", "ACC-PINV-2026-00001"
+    )
+    mock_pi.cancel.assert_called_once()
+    assert mock_pi.flags.ignore_permissions is True
+    mock_frappe.db.set_value.assert_not_called()
+    mock_frappe.db.commit.assert_called()
+    mock_app.tenant_db.delete_doc.assert_called_once_with(
         "Purchase Invoice",
         "ACC-PINV-2026-00001",
-        {"docstatus": 2, "status": "Cancelled"},
-    )
-    mock_app.tenant_db.delete_doc.assert_called_once_with(
-        "Purchase Invoice", "ACC-PINV-2026-00001"
+        force=True,
+        ignore_permissions=True,
     )
 
 
@@ -922,5 +935,28 @@ def test_delete_purchase_invoice_draft_deletes_without_cancel():
     assert result["success"] is True
     mock_frappe.db.set_value.assert_not_called()
     mock_app.tenant_db.delete_doc.assert_called_once_with("Purchase Invoice", "PI-1")
+
+
+def test_delete_purchase_invoice_cancelled_uses_force_delete():
+    """Cancelled PI still links to GL Entry in ERPNext; delete must use force=True."""
+    mock_frappe.defaults = MagicMock()
+    mock_frappe.defaults.get_user_default.return_value = "Acme Pty Ltd"
+
+    def _gv(*args, **kwargs):
+        if args and args[0] == "Purchase Invoice":
+            return {"docstatus": 2, "company": "Acme Pty Ltd"}
+        return None
+
+    mock_frappe.db.get_value.side_effect = _gv
+
+    result = delete_purchase_invoice("user@example.com", "PI-CXL")
+
+    assert result["success"] is True
+    mock_app.tenant_db.delete_doc.assert_called_once_with(
+        "Purchase Invoice",
+        "PI-CXL",
+        force=True,
+        ignore_permissions=True,
+    )
 
 

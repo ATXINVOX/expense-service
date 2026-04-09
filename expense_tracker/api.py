@@ -460,8 +460,11 @@ def create_purchase_invoice(user):
 def delete_purchase_invoice(user, name):
     """DELETE /api/resource/Purchase Invoice/<name>: cancel if submitted, then delete.
 
-    Draft (0) and cancelled (2) invoices are deleted directly. Submitted (1) are
-    moved to cancelled via DB update first, then removed.
+    Draft (0) is deleted normally. Submitted (1) uses ``doc.cancel()`` so GL is
+    reversed, then ``delete_doc(..., force=True)`` because ERPNext keeps GL Entry
+    links to the voucher and Frappe would otherwise raise ``LinkExistsError``.
+    Cancelled (2), including retries after a partial failure, uses the same forced
+    delete path.
     """
     import urllib.parse
 
@@ -503,21 +506,29 @@ def delete_purchase_invoice(user, name):
             )
 
         docstatus = int(row.get("docstatus") or 0)
+        # Cancelled PIs remain dynamically linked to GL Entry rows in ERPNext; link checks
+        # block delete unless force=True (after a real cancel(), GL is reversed — safe to remove).
+        delete_kwargs = {}
         if docstatus == 1:
-            frappe.db.set_value(
-                "Purchase Invoice",
-                name,
-                {"docstatus": 2, "status": "Cancelled"},
-            )
+            doc = _app_db().get_doc("Purchase Invoice", name)
+            doc.flags.ignore_permissions = True
+            doc.cancel()
             frappe.db.commit()
-            logger.info("DELETE_PI: cancelled before delete name=%s user=%s", name, user)
-        elif docstatus not in (0, 2):
+            logger.info(
+                "DELETE_PI: cancelled via doc.cancel() name=%s user=%s",
+                name,
+                user,
+            )
+            delete_kwargs = {"force": True, "ignore_permissions": True}
+        elif docstatus == 2:
+            delete_kwargs = {"force": True, "ignore_permissions": True}
+        elif docstatus != 0:
             return _build_error(
                 f"Unexpected docstatus={docstatus} for Purchase Invoice {name}.",
                 400, "ValidationError"
             )
 
-        get_app().tenant_db.delete_doc("Purchase Invoice", name)
+        _app_db().delete_doc("Purchase Invoice", name, **delete_kwargs)
         logger.info("DELETE_PI: success name=%s user=%s", name, user)
 
         return {
@@ -526,6 +537,12 @@ def delete_purchase_invoice(user, name):
             "message": "Purchase Invoice deleted",
         }
 
+    except frappe.LinkExistsError as e:
+        logger.warning("DELETE_PI: link exists name=%r user=%s: %s", name, user, e)
+        return _build_error(str(e), 400, "LinkExistsError")
+    except frappe.ValidationError as e:
+        logger.warning("DELETE_PI: validation name=%r user=%s: %s", name, user, e)
+        return _build_error(f"Invalid input data: {e}", 400, "ValidationError")
     except frappe.PermissionError:
         return {"error": "Access denied"}, 403
     except frappe.DoesNotExistError:
