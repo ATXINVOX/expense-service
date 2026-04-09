@@ -649,7 +649,7 @@ def test_frappe_client_submit_purchase_invoice_success():
     assert result["name"] == "ACC-PINV-2026-00001"
     assert result["docstatus"] == 1
     mock_frappe.db.set_value.assert_called_with(
-        "Purchase Invoice", "ACC-PINV-2026-00001", "title", "Fuel"
+        "Purchase Invoice", "ACC-PINV-2026-00001", "title", "Fuel", update_modified=False
     )
     stub_frappe_client_submit.assert_called_once_with(
         {"doctype": "Purchase Invoice", "name": "ACC-PINV-2026-00001"}
@@ -673,7 +673,7 @@ def test_frappe_client_submit_accepts_doc_and_invoice_name_alias():
     frappe_client_submit("user@example.com")
 
     mock_frappe.db.set_value.assert_called_with(
-        "Purchase Invoice", "PI-2", "title", "Coffee (+1 more)"
+        "Purchase Invoice", "PI-2", "title", "Coffee (+1 more)", update_modified=False
     )
     stub_frappe_client_submit.assert_called_once_with(
         {"doctype": "Purchase Invoice", "name": "PI-2"}

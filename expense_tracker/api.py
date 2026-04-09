@@ -237,8 +237,12 @@ def frappe_client_submit(user):
                 int(row.get("expense_items_count") or 0),
                 row.get("remarks"),
             )
+            # Do not bump `modified`: a timestamp change here breaks doc.submit()'s
+            # check_if_latest() against the row the client last saved (e.g. PUT remarks).
             if expense_title:
-                frappe.db.set_value("Purchase Invoice", name, "title", expense_title)
+                frappe.db.set_value(
+                    "Purchase Invoice", name, "title", expense_title, update_modified=False
+                )
 
             logger.info("SUBMIT (frappe.client.submit): PI name=%s user=%s", name, user)
             client_submit = frappe.get_attr("frappe.client.submit")
