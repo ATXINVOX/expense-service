@@ -141,10 +141,14 @@ def _resolve_company():
 
 @get_app().secure_route("/api/method/frappe.client.submit", methods=["POST"])
 def frappe_client_submit(user):
-    """Whitelisted-style submit on this site: calls Frappe ``frappe.client.submit`` (real ``doc.submit()``).
+    """Submit a document on this site.
 
-    For **Purchase Invoice**, enforces company match and optional expense title (same rules as before),
-    verifies tenant via ``tenant_db.get_doc``, then delegates to ``frappe.client.submit``.
+    For **Purchase Invoice**, validates company ownership, tenant access, and draft state,
+    sets the expense title without bumping ``modified`` (so ``check_if_latest`` matches the
+    client’s last save), then calls ``doc.submit()`` for ERPNext’s full submission lifecycle.
+    Returns ``{"success": true, "docstatus": 1, "name": "<id>"}``.
+
+    For other doctypes, delegates to ``frappe.client.submit``.
 
     Body (Frappe standard):
 
@@ -237,16 +241,18 @@ def frappe_client_submit(user):
                 int(row.get("expense_items_count") or 0),
                 row.get("remarks"),
             )
-            # Do not bump `modified`: a timestamp change here breaks doc.submit()'s
-            # check_if_latest() against the row the client last saved (e.g. PUT remarks).
             if expense_title:
                 frappe.db.set_value(
                     "Purchase Invoice", name, "title", expense_title, update_modified=False
                 )
 
-            logger.info("SUBMIT (frappe.client.submit): PI name=%s user=%s", name, user)
-            client_submit = frappe.get_attr("frappe.client.submit")
-            return client_submit({"doctype": doctype, "name": name})
+            doc = frappe.get_doc("Purchase Invoice", name)
+            doc.flags.ignore_permissions = True
+            doc.submit()
+            frappe.db.commit()
+            logger.info("SUBMIT: success name=%s docstatus=%s user=%s", name, doc.docstatus, user)
+            # ERPNext sets doc.status to payment workflow (e.g. "Unpaid"); clients use docstatus.
+            return {"success": True, "docstatus": doc.docstatus, "name": doc.name}
 
         _app_db().get_doc(doctype, name, verify_tenant=True)
         logger.info("SUBMIT (frappe.client.submit): %s %s user=%s", doctype, name, user)
@@ -264,6 +270,7 @@ def frappe_client_submit(user):
         return _build_error("You do not have permission to submit this document", 403, "PermissionError")
 
     except frappe.ValidationError as e:
+        logger.warning("SUBMIT: validation error name=%r user=%s: %s", name_raw, user, e)
         return _build_error(f"Invalid input: {e}", 400, "ValidationError")
 
     except Exception as e:

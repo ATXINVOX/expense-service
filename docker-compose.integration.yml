@@ -1,11 +1,37 @@
 services:
   dev-central-site:
-    image: docker.io/vyogo/erpnext:sne-version-16
+    image: ghcr.io/atxinvox/central-site:sne-latest
     ports:
-      - "8080:8000"
+      - "8080:8000"   # ERPNext / Frappe web server
+      - "9004:9004"   # expense-service (started by run script)
     command: ["/usr/libexec/s2i/run"]
     volumes:
-      # expense-service source (controllers/, expense_tracker/, tests/)
+      # expense-service source (controllers/, expense_tracker/, server.py, tests/)
       - .:/mnt/expense
-      # frappe-microservice-lib source — installed via pip inside the container
-      - ../frappe-microservice-lib:/mnt/lib
+      # frappe-microservice-lib — installed via pip inside the container.
+      # CI sets MS_LIB_PATH=./frappe-microservice-lib (in-workspace checkout).
+      # Local dev leaves MS_LIB_PATH unset, falling back to the sibling repo.
+      - ${MS_LIB_PATH:-../frappe-microservice-lib}:/mnt/lib
+
+  cypress:
+    image: cypress/included:13.6.0
+    depends_on:
+      - dev-central-site
+    working_dir: /mnt/expense
+    volumes:
+      - .:/mnt/expense
+    environment:
+      # Expense-service HTTP endpoint (inside the shared Docker network)
+      CYPRESS_EXPENSE_SERVICE_URL: http://dev-central-site:9004
+      # Frappe login endpoint — used to obtain a session SID
+      CYPRESS_EXPENSE_FRAPPE_URL: http://dev-central-site:8000
+      # Company created by integration test fixtures
+      CYPRESS_EXPENSE_TEST_COMPANY: "_Test Expense Integ Co"
+      # Administrator password for the ERPNext test site
+      CYPRESS_ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin}
+    # Run npm install then Cypress; only invoked explicitly by the run script
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - "npm install --silent && cypress run --spec 'cypress/e2e/features/expense_submit/**/*.feature,cypress/e2e/features/expense_api/**/*.feature'"
+    # Not started by `docker compose up` — invoked via `docker compose run --rm cypress`
+    profiles: ["cypress"]

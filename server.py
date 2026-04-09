@@ -4,10 +4,11 @@ from frappe_microservice import create_microservice, setup_controllers
 import frappe_microservice.controller as controller_module
 
 # Initialize microservice
+# FRAPPE_SITES_PATH and SERVICE_PORT can be overridden for local/test environments
 app = create_microservice(
     "expense_tracker",
-    port=8000,
-    sites_path="/app/sites",
+    port=int(os.environ.get("SERVICE_PORT", 8000)),
+    sites_path=os.environ.get("FRAPPE_SITES_PATH", "/app/sites"),
     load_framework_hooks=['frappe', 'erpnext']
 )
 

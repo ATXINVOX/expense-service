@@ -23,7 +23,6 @@ Function-scoped:
 
 import os
 import sys
-from datetime import date
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -57,6 +56,13 @@ def _discover_site():
 
 
 def _ensure_column(doctype, column, coltype="varchar(140)"):
+    """Add a column to a Frappe table if it does not already exist.
+
+    Used only for expense-service-specific custom fields
+    (expense_item_name, expense_item_group, expense_items_count).
+    The central-site image already carries tenant_id on all standard tables,
+    so tenant_id columns must NOT be added here.
+    """
     try:
         frappe.db.sql(f"ALTER TABLE `tab{doctype}` ADD COLUMN `{column}` {coltype}")
     except Exception:
@@ -86,21 +92,16 @@ def frappe_session():
     frappe.set_user("Administrator")
     frappe.flags.in_test = True
 
-    # Ensure tenant_id column exists on all relevant tables
-    for dt in (
-        "Purchase Invoice",
-        "Purchase Invoice Item",
-        "Purchase Taxes and Charges",
-        "Supplier",
-        "Item",
-        "Item Group",
-        "Cost Center",
-        "Account",
-        "Company",
-    ):
-        _ensure_column(dt, "tenant_id")
+    # The central-site image filters every frappe.db query by the current
+    # user's tenant_id.  Set it on Administrator now so all frappe.db calls
+    # within the test session resolve against the correct tenant.
+    frappe.db.sql(
+        "UPDATE `tabUser` SET tenant_id = %s WHERE name = 'Administrator'",
+        (TEST_TENANT_ID,),
+    )
 
-    # Ensure expense-service custom columns exist
+    # Ensure expense-service custom columns exist on Purchase Invoice.
+    # tenant_id is already present on all tables in the central-site image.
     for col, coltype in (
         ("expense_item_name",  "varchar(140)"),
         ("expense_item_group", "varchar(140)"),
@@ -130,43 +131,59 @@ def test_company(frappe_session):
         company.insert(ignore_permissions=True, ignore_mandatory=True)
         frappe.db.commit()
 
+    # TenantAwareDB injects tenant_id into all queries; set it on the company
+    # so controller lookups (company abbr, default accounts) can find it.
+    frappe.db.set_value("Company", TEST_COMPANY, "tenant_id", TEST_TENANT_ID)
+    frappe.db.commit()
+
     return TEST_COMPANY
 
 
 @pytest.fixture(scope="session")
 def ensure_fiscal_year(frappe_session, test_company):
-    """Ensure a Fiscal Year covering today's date exists."""
-    today = date.today()
+    """Ensure a Fiscal Year covering today's date exists and is linked to the test company.
+
+    Uses frappe.utils.today() so the date matches the ERPNext container's clock
+    (which may differ from the host due to timezone offsets), preventing
+    'Date is not in any active Fiscal Year' errors during doc.submit().
+    The test company link is always (re-)created so existing fiscal years from
+    the before_tests bootstrap also cover the test company.
+    """
+    # Use container-side date to match what ERPNext stamps on new documents.
+    today = frappe.utils.getdate(frappe.utils.today())
     existing = frappe.db.sql(
         "SELECT name FROM `tabFiscal Year` "
         "WHERE year_start_date <= %s AND year_end_date >= %s LIMIT 1",
         (today, today), as_dict=True,
     )
+
     if existing:
-        return existing[0]["name"]
+        fy_name = existing[0]["name"]
+    else:
+        fy_start = today.replace(month=7, day=1) if today.month >= 7 \
+                   else today.replace(year=today.year - 1, month=7, day=1)
+        fy_end   = fy_start.replace(year=fy_start.year + 1, month=6, day=30)
+        fy_name  = f"{fy_start.year}-{fy_end.year}"
 
-    fy_start = today.replace(month=7, day=1) if today.month >= 7 \
-               else today.replace(year=today.year - 1, month=7, day=1)
-    fy_end   = fy_start.replace(year=fy_start.year + 1, month=6, day=30)
-    fy_name  = f"{fy_start.year}-{fy_end.year}"
+        if not frappe.db.exists("Fiscal Year", fy_name):
+            fy = frappe.get_doc({
+                "doctype": "Fiscal Year",
+                "year": fy_name,
+                "year_start_date": str(fy_start),
+                "year_end_date":   str(fy_end),
+            })
+            fy.insert(ignore_permissions=True, ignore_mandatory=True)
 
-    if not frappe.db.exists("Fiscal Year", fy_name):
-        fy = frappe.get_doc({
-            "doctype": "Fiscal Year",
-            "year": fy_name,
-            "year_start_date": str(fy_start),
-            "year_end_date":   str(fy_end),
-        })
-        fy.insert(ignore_permissions=True, ignore_mandatory=True)
-        frappe.db.sql(
-            "INSERT IGNORE INTO `tabFiscal Year Company` "
-            "(name, parent, parenttype, parentfield, company, "
-            " creation, modified, modified_by, owner, docstatus, idx) "
-            "VALUES (%s, %s, 'Fiscal Year', 'companies', %s, "
-            " NOW(), NOW(), 'Administrator', 'Administrator', 0, 1)",
-            (f"{fy_name}-{test_company}", fy_name, test_company),
-        )
-        frappe.db.commit()
+    # Always link the test company — the bootstrap fiscal year may not include it.
+    frappe.db.sql(
+        "INSERT IGNORE INTO `tabFiscal Year Company` "
+        "(name, parent, parenttype, parentfield, company, "
+        " creation, modified, modified_by, owner, docstatus, idx) "
+        "VALUES (%s, %s, 'Fiscal Year', 'companies', %s, "
+        " NOW(), NOW(), 'Administrator', 'Administrator', 0, 1)",
+        (f"{fy_name}-{test_company}", fy_name, test_company),
+    )
+    frappe.db.commit()
 
     return fy_name
 
@@ -175,6 +192,8 @@ def ensure_fiscal_year(frappe_session, test_company):
 def test_accounts(frappe_session, test_company):
     """Ensure minimum chart of accounts exists for the test company."""
     abbr = TEST_COMPANY_ABBR
+
+    company_currency = frappe.db.get_value("Company", test_company, "default_currency") or "AUD"
 
     def _ensure_account(name, account_name, root_type, report_type,
                         account_type=None, parent=None, is_group=0):
@@ -186,6 +205,8 @@ def test_accounts(frappe_session, test_company):
                 "root_type": root_type,
                 "report_type": report_type,
                 "is_group": is_group,
+                # Required for GL entry currency validation during doc.submit()
+                "account_currency": company_currency,
             }
             if account_type:
                 data["account_type"] = account_type
@@ -193,6 +214,18 @@ def test_accounts(frappe_session, test_company):
                 data["parent_account"] = parent
             doc = frappe.get_doc(data)
             doc.insert(ignore_permissions=True, ignore_mandatory=True)
+        else:
+            # Account already exists — patch account_type and account_currency
+            # in case it was created without them (e.g. ignore_mandatory=True).
+            updates = {}
+            if account_type:
+                current = frappe.db.get_value("Account", name, "account_type")
+                if current != account_type:
+                    updates["account_type"] = account_type
+            if not frappe.db.get_value("Account", name, "account_currency"):
+                updates["account_currency"] = company_currency
+            if updates:
+                frappe.db.set_value("Account", name, updates)
         return name
 
     # Root accounts (groups)
@@ -201,11 +234,33 @@ def test_accounts(frappe_session, test_company):
     expense_root   = _ensure_account(f"Expenses - {abbr}",    "Expenses",    "Expense",   "Profit and Loss",     is_group=1)
 
     # Leaf accounts
-    payable  = _ensure_account(
+    # When ERPNext auto-creates a chart on company insert, "Accounts Payable"
+    # is typically a GROUP account (is_group=1) with "Creditors" as the leaf.
+    # We must resolve to a non-group payable account for doc.submit() to pass
+    # validation ("group accounts cannot be used in transactions").
+    _ensure_account(
         f"Accounts Payable - {abbr}", "Accounts Payable",
         "Liability", "Balance Sheet", account_type="Payable",
         parent=liability_root,
     )
+    payable = frappe.db.get_value(
+        "Account",
+        {"company": test_company, "account_type": "Payable", "is_group": 0},
+        "name",
+    )
+    if not payable:
+        # No leaf payable exists yet — create one under the payable group
+        payable_group = frappe.db.get_value(
+            "Account",
+            {"company": test_company, "account_type": "Payable", "is_group": 1},
+            "name",
+        )
+        payable = _ensure_account(
+            f"Creditors - {abbr}", "Creditors",
+            "Liability", "Balance Sheet", account_type="Payable",
+            parent=payable_group or liability_root,
+        )
+
     expense  = _ensure_account(
         f"General Expenses - {abbr}", "General Expenses",
         "Expense", "Profit and Loss", account_type="Expense Account",
@@ -217,6 +272,12 @@ def test_accounts(frappe_session, test_company):
         "default_payable_account": payable,
         "default_expense_account": expense,
     })
+    frappe.db.commit()
+
+    # TenantAwareDB injects tenant_id into all queries; tag key records so
+    # controller lookups (_company_abbr, expense account, cost center) find them.
+    for acct in (payable, expense):
+        frappe.db.set_value("Account", acct, "tenant_id", TEST_TENANT_ID)
     frappe.db.commit()
 
     # Cost center
@@ -240,6 +301,11 @@ def test_accounts(frappe_session, test_company):
         }).insert(ignore_permissions=True, ignore_mandatory=True)
 
     frappe.db.set_value("Company", test_company, "cost_center", cc_main)
+    frappe.db.commit()
+
+    # Tag cost centers with tenant_id so TenantAwareDB can find them
+    for cc in (cc_root, cc_main):
+        frappe.db.set_value("Cost Center", cc, "tenant_id", TEST_TENANT_ID)
     frappe.db.commit()
 
     return {
@@ -312,6 +378,8 @@ def mock_app(tenant_db, test_company):
         frappe.get_doc({
             "doctype": "DefaultValue",
             "parent": "Administrator",
+            "parenttype": "User",
+            "parentfield": "defaults",
             "defkey": "company",
             "defvalue": test_company,
         }).insert(ignore_permissions=True)
@@ -326,6 +394,14 @@ def mock_app(tenant_db, test_company):
 
     app_mock = MagicMock()
     app_mock.tenant_db = tenant_db
+
+    # Ensure the module-level _registry in frappe_microservice.controller points
+    # at the shared frappe._microservice_registry so controller hooks can find
+    # the PurchaseInvoice controller class (server.py normally does this).
+    import frappe_microservice.controller as _ctrl_module
+    from frappe_microservice.controller import setup_controllers as _setup_controllers
+    _ctrl_module._registry = _ctrl_module.get_controller_registry()
+    _setup_controllers(app_mock, controllers_directory=os.path.join(EXPENSE_MOUNT, "controllers"))
 
     with patch("frappe_microservice.get_app", return_value=app_mock), \
          patch("expense_tracker.api.get_app", return_value=app_mock), \

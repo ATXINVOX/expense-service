@@ -40,16 +40,38 @@ jobs:
   integration-test:
     needs: test
     runs-on: ubuntu-latest
+    env:
+      # Consistent volume mount path for all docker compose calls in this job.
+      # The lib is extracted from the GHCR image into /tmp/ms-src in the
+      # "Extract frappe-microservice" step and mounted as /mnt/lib.
+      MS_LIB_PATH: /tmp/ms-src
     steps:
       - name: Checkout expense-service
         uses: actions/checkout@v4
 
-      - name: Checkout frappe-microservice-lib (sibling repo)
-        uses: actions/checkout@v4
-        with:
-          repository: ATXINVOX/frappe-microservice-lib
-          path: ../frappe-microservice-lib
-          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Extract frappe-microservice from published image
+        run: |
+          # Create (don't run) a container from the lib image to copy files out.
+          # GITHUB_TOKEN can pull packages from the same org without extra permissions.
+          docker create --name ms-extract ghcr.io/atxinvox/frappe-microservice-lib:latest
+          mkdir -p /tmp/ms-src
+          docker cp ms-extract:/opt/venv/lib/python3.14/site-packages/frappe_microservice \
+            /tmp/ms-src/frappe_microservice
+          docker rm ms-extract
+          # Write setup files via Python to avoid heredoc indentation problems.
+          python3 - << 'PYEOF'
+          import pathlib
+          base = pathlib.Path("/tmp/ms-src")
+          (base / "setup.cfg").write_text(
+              "[metadata]\nname = frappe-microservice\nversion = 1.4.0\n"
+              "[options]\npackages = find:\ninstall_requires =\n"
+              "    flask\n    flasgger\n    gunicorn\n    pyjwt\n    requests\n"
+          )
+          (base / "setup.py").write_text("from setuptools import setup\nsetup()\n")
+          PYEOF
 
       - name: Start integration container
         run: docker compose -f docker-compose.integration.yml up -d
@@ -93,14 +115,89 @@ jobs:
               bash -c "cd $BENCH && bench --site dev.localhost execute erpnext.setup.utils.before_tests"
           fi
 
+      - name: Create test company with full ERPNext chart of accounts
+        run: |
+          docker compose -f docker-compose.integration.yml exec -T dev-central-site \
+            /home/frappe/frappe-bench/env/bin/python - << 'PYEOF'
+          import frappe
+          frappe.init(site='dev.localhost', sites_path='/home/frappe/frappe-bench/sites')
+          frappe.connect()
+          frappe.set_user("Administrator")
+
+          TEST_COMPANY = "_Test Expense Integ Co"
+          TEST_ABBR    = "TEIC"
+
+          if not frappe.db.exists("Company", TEST_COMPANY):
+              # Create via ERPNext's proper flow so it auto-builds the full chart
+              # of accounts (account_currency, lft/rgt tree, payable/expense
+              # accounts, cost centers) — required for doc.submit() GL entries.
+              company = frappe.get_doc({
+                  "doctype": "Company",
+                  "company_name": TEST_COMPANY,
+                  "abbr": TEST_ABBR,
+                  "default_currency": "AUD",
+                  "country": "Australia",
+                  "create_chart_of_accounts_based_on": "Standard Template",
+                  "chart_of_accounts": "Standard",
+              })
+              company.insert(ignore_permissions=True)
+              frappe.db.commit()
+              print(f"Created company: {TEST_COMPANY}")
+          else:
+              print(f"Company already exists: {TEST_COMPANY}")
+
+          # Ensure account_currency is set on all accounts for this company
+          # (guards against accounts created with ignore_mandatory=True).
+          default_currency = frappe.db.get_value("Company", TEST_COMPANY, "default_currency") or "AUD"
+          frappe.db.sql("""
+              UPDATE `tabAccount`
+              SET account_currency = %s
+              WHERE company = %s AND (account_currency IS NULL OR account_currency = '')
+          """, (default_currency, TEST_COMPANY))
+
+          # Ensure the company has a default payable account and cost center set.
+          payable = frappe.db.get_value(
+              "Account",
+              {"company": TEST_COMPANY, "account_type": "Payable", "is_group": 0},
+              "name",
+          )
+          if payable:
+              frappe.db.set_value("Company", TEST_COMPANY, "default_payable_account", payable)
+              print(f"Set default_payable_account: {payable}")
+
+          expense = frappe.db.get_value(
+              "Account",
+              {"company": TEST_COMPANY, "account_type": "Expense Account", "is_group": 0},
+              "name",
+          )
+          if expense:
+              frappe.db.set_value("Company", TEST_COMPANY, "default_expense_account", expense)
+              print(f"Set default_expense_account: {expense}")
+
+          cost_center = frappe.db.get_value(
+              "Cost Center",
+              {"company": TEST_COMPANY, "is_group": 0},
+              "name",
+          )
+          if cost_center:
+              frappe.db.set_value("Company", TEST_COMPANY, "cost_center", cost_center)
+              print(f"Set cost_center: {cost_center}")
+
+          frappe.db.commit()
+          print("Test company setup complete.")
+          frappe.destroy()
+          PYEOF
+
       - name: Install frappe-microservice lib and test deps
         run: |
           docker compose -f docker-compose.integration.yml exec -T dev-central-site \
             /home/frappe/frappe-bench/env/bin/pip install --quiet /mnt/lib pytest pytest-cov
 
-      - name: Run integration tests with coverage
+      - name: Run Python integration tests with coverage
         run: |
-          docker compose -f docker-compose.integration.yml exec -T dev-central-site \
+          docker compose -f docker-compose.integration.yml exec -T \
+            -e PYTHONPATH=/mnt/expense \
+            dev-central-site \
             /home/frappe/frappe-bench/env/bin/python -m pytest \
               /mnt/expense/tests/integration/ \
               --confcutdir=/mnt/expense/tests/integration \
@@ -112,9 +209,86 @@ jobs:
               --rootdir=/mnt/expense \
               -v --tb=short
 
+      - name: Seed Administrator tenant_id and company default for Cypress HTTP tests
+        run: |
+          docker compose -f docker-compose.integration.yml exec -T dev-central-site \
+            /home/frappe/frappe-bench/env/bin/python - << 'PYEOF'
+          import frappe
+          frappe.init(site='dev.localhost', sites_path='/home/frappe/frappe-bench/sites')
+          frappe.connect()
+          TEST_TENANT_ID = "expense-integ-tenant-001"
+          TEST_COMPANY   = "_Test Expense Integ Co"
+          # tenant_id already exists on tabUser in the central-site image.
+          frappe.db.sql(
+              "UPDATE `tabUser` SET tenant_id = %s WHERE name = 'Administrator'",
+              (TEST_TENANT_ID,),
+          )
+          existing = frappe.db.get_value(
+              "DefaultValue", {"parent": "Administrator", "defkey": "company"}, "name"
+          )
+          if existing:
+              frappe.db.set_value("DefaultValue", existing, "defvalue", TEST_COMPANY)
+          else:
+              frappe.get_doc({
+                  "doctype": "DefaultValue",
+                  "parent": "Administrator",
+                  "parenttype": "User",
+                  "parentfield": "defaults",
+                  "defkey": "company",
+                  "defvalue": TEST_COMPANY,
+              }).insert(ignore_permissions=True)
+          frappe.db.commit()
+          print(f"Administrator.tenant_id = {TEST_TENANT_ID}")
+          print(f"Administrator default company = {TEST_COMPANY}")
+          frappe.destroy()
+          PYEOF
+
+      - name: Start expense-service HTTP server on port 9004
+        run: |
+          BENCH="/home/frappe/frappe-bench"
+          # Read active site name from currentsite.txt — same approach used by bench migrate
+          FRAPPE_SITE=$(docker compose -f docker-compose.integration.yml exec -T dev-central-site \
+            bash -c "cat $BENCH/sites/currentsite.txt 2>/dev/null || echo dev.localhost" | tr -d '\r\n')
+          echo "Using Frappe site: $FRAPPE_SITE"
+          docker compose -f docker-compose.integration.yml exec -d dev-central-site bash -c "
+            export FRAPPE_SITES_PATH=$BENCH/sites
+            export FRAPPE_SITE=$FRAPPE_SITE
+            export SERVICE_PORT=9004
+            $BENCH/env/bin/gunicorn \
+              --chdir $BENCH \
+              --pythonpath /mnt/expense \
+              --bind 0.0.0.0:9004 \
+              --workers 2 \
+              --timeout 120 \
+              server:app \
+              >> /home/frappe/logs/expense-service.log 2>&1
+          "
+
+      - name: Wait for expense-service
+        run: |
+          for i in $(seq 1 20); do
+            if docker compose -f docker-compose.integration.yml exec -T dev-central-site \
+              curl -sf http://localhost:9004/health &>/dev/null; then
+              echo "expense-service ready"; exit 0
+            fi
+            echo "  attempt $i/20..."; sleep 3
+          done
+          echo "FATAL: expense-service not ready" && exit 1
+
+      - name: Run Cypress API tests
+        run: |
+          docker compose -f docker-compose.integration.yml \
+            --profile cypress run --rm cypress
+
+      - name: Dump expense-service logs (debug)
+        if: always()
+        run: |
+          docker compose -f docker-compose.integration.yml exec -T dev-central-site \
+            tail -80 /home/frappe/logs/expense-service.log 2>/dev/null || echo "(no log)"
+
       - name: Tear down
         if: always()
-        run: docker compose -f docker-compose.integration.yml down -v
+        run: docker compose -f docker-compose.integration.yml --profile cypress down -v
 
   build:
     needs: [test, integration-test]
