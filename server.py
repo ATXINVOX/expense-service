@@ -34,8 +34,6 @@ app.register_resource(
         "delete": expense_tracker_api.delete_purchase_invoice,
     },
 )
-app.register_resource("Item Group")
-app.register_resource("Item")
 
 if __name__ == "__main__":
     app.run()
