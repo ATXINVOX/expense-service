@@ -302,13 +302,25 @@ def frappe_client_submit(user):
                 int(row.get("expense_items_count") or 0),
                 row.get("remarks"),
             )
-            if expense_title:
-                frappe.db.set_value(
-                    "Purchase Invoice", name, "title", expense_title, update_modified=False
-                )
-            # Ensure DB writes (e.g. title) are visible before load; avoids rare submit/read races.
-            frappe.db.commit()
-            frappe.clear_document_cache("Purchase Invoice", name)
+            # ERPNext / site schema may omit ``title`` on Purchase Invoice (no DB column).
+            if expense_title and frappe.db.has_column("Purchase Invoice", "title"):
+                try:
+                    frappe.db.set_value(
+                        "Purchase Invoice",
+                        name,
+                        "title",
+                        expense_title,
+                        update_modified=False,
+                    )
+                    frappe.db.commit()
+                    frappe.clear_document_cache("Purchase Invoice", name)
+                except Exception as exc:
+                    logger.warning(
+                        "SUBMIT: could not set Purchase Invoice title name=%r: %s",
+                        name,
+                        exc,
+                    )
+                    frappe.db.rollback()
 
             doc = frappe.get_doc("Purchase Invoice", name)
             doc.flags.ignore_permissions = True

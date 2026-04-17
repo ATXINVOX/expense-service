@@ -117,6 +117,7 @@ def reset_mocks():
     mock_app.db.exists.return_value = False
     mock_app.tenant_db.reset_mock()
     mock_frappe.db.reset_mock()
+    mock_frappe.db.has_column = MagicMock(return_value=True)
     mock_frappe.get_all.reset_mock()
     mock_frappe.get_doc.reset_mock()
     mock_app.tenant_db.get_value.side_effect = lambda *args, **kwargs: mock_frappe.db.get_value(*args, **kwargs)
@@ -685,6 +686,33 @@ def test_frappe_client_submit_accepts_doc_and_invoice_name_alias():
         "Purchase Invoice", "PI-2", "title", "Coffee (+1 more)", update_modified=False
     )
     mock_frappe.get_doc.assert_called_once_with("Purchase Invoice", "PI-2")
+    mock_pi_doc.submit.assert_called_once()
+
+
+def test_frappe_client_submit_skips_title_when_no_db_column():
+    """Sites without ``tabPurchase Invoice.title`` (older ERPNext) must still submit."""
+    sys.modules["flask"].request.get_json.return_value = {"name": "PI-NO-TITLE-COL"}
+    mock_frappe.defaults = MagicMock()
+    mock_frappe.defaults.get_user_default.return_value = "Acme Pty Ltd"
+    mock_frappe.db.get_value.return_value = {
+        "docstatus": 0,
+        "company": "Acme Pty Ltd",
+        "expense_item_name": "Fuel",
+        "expense_items_count": 1,
+        "remarks": None,
+    }
+    mock_frappe.db.has_column = MagicMock(return_value=False)
+    mock_app.tenant_db.get_doc.return_value = MagicMock()
+
+    mock_pi_doc = MagicMock()
+    mock_pi_doc.name = "PI-NO-TITLE-COL"
+    mock_pi_doc.docstatus = 1
+    mock_frappe.get_doc.return_value = mock_pi_doc
+
+    result = frappe_client_submit("user@example.com")
+
+    assert result["success"] is True
+    mock_frappe.db.set_value.assert_not_called()
     mock_pi_doc.submit.assert_called_once()
 
 
