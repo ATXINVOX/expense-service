@@ -25,6 +25,26 @@ function sessionHeaders() {
   };
 }
 
+/** Calendar Y-m-d in the Cypress runner's local TZ (avoids hardcoded Gherkin dates missing Fiscal Year). */
+function integrationPostingDate() {
+  const fromEnv = Cypress.env("EXPENSE_POSTING_DATE");
+  if (fromEnv && String(fromEnv).trim()) {
+    return String(fromEnv).trim();
+  }
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function applyIntegrationPostingDate(body) {
+  if (!body || typeof body !== "object" || !("posting_date" in body)) {
+    return;
+  }
+  Object.assign(body, { posting_date: integrationPostingDate() });
+}
+
 // ---------------------------------------------------------------------------
 // Auth: login via Frappe session API and export SID
 // ---------------------------------------------------------------------------
@@ -109,6 +129,7 @@ When("I POST a new Purchase Invoice for expense draft submit with:", (dataTable)
     }
   }
   if (!body.company) body.company = company;
+  applyIntegrationPostingDate(body);
 
   cy.request({
     method: "POST",
@@ -123,6 +144,7 @@ When("I POST a new Purchase Invoice with body:", (docString) => {
   const body = JSON.parse(docString.trim());
   const company = Cypress.env("EXPENSE_TEST_COMPANY") || "Acme Pty Ltd";
   if (!body.company) body.company = company;
+  applyIntegrationPostingDate(body);
 
   cy.request({
     method: "POST",
@@ -172,7 +194,12 @@ When("I POST submit_purchase_invoice for the stored invoice name", () => {
     headers: sessionHeaders(),
     body: { name: state.storedInvoiceName },
     failOnStatusCode: false,
-  }).then((res) => { state.lastResponse = res; });
+  }).then((res) => {
+    state.lastResponse = res;
+    if (res.status !== 200) {
+      cy.log(`submit failed: HTTP ${res.status} body=${JSON.stringify(res.body)}`);
+    }
+  });
 });
 
 When("I POST submit_purchase_invoice with JSON body:", (docString) => {
