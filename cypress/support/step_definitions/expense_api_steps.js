@@ -45,6 +45,19 @@ function applyIntegrationPostingDate(body) {
   Object.assign(body, { posting_date: integrationPostingDate() });
 }
 
+function postPurchaseInvoiceWithSession(body) {
+  applyIntegrationPostingDate(body);
+  cy.request({
+    method: "POST",
+    url: `${serviceBaseUrl()}/api/resource/Purchase%20Invoice`,
+    headers: sessionHeaders(),
+    body,
+    failOnStatusCode: false,
+  }).then((res) => {
+    state.lastResponse = res;
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Auth: login via Frappe session API and export SID
 // ---------------------------------------------------------------------------
@@ -129,30 +142,14 @@ When("I POST a new Purchase Invoice for expense draft submit with:", (dataTable)
     }
   }
   if (!body.company) body.company = company;
-  applyIntegrationPostingDate(body);
-
-  cy.request({
-    method: "POST",
-    url: `${serviceBaseUrl()}/api/resource/Purchase%20Invoice`,
-    headers: sessionHeaders(),
-    body,
-    failOnStatusCode: false,
-  }).then((res) => { state.lastResponse = res; });
+  postPurchaseInvoiceWithSession(body);
 });
 
 When("I POST a new Purchase Invoice with body:", (docString) => {
   const body = JSON.parse(docString.trim());
   const company = Cypress.env("EXPENSE_TEST_COMPANY") || "Acme Pty Ltd";
   if (!body.company) body.company = company;
-  applyIntegrationPostingDate(body);
-
-  cy.request({
-    method: "POST",
-    url: `${serviceBaseUrl()}/api/resource/Purchase%20Invoice`,
-    headers: sessionHeaders(),
-    body,
-    failOnStatusCode: false,
-  }).then((res) => { state.lastResponse = res; });
+  postPurchaseInvoiceWithSession(body);
 });
 
 // ---------------------------------------------------------------------------
@@ -231,7 +228,11 @@ When("I GET the dashboard summary", () => {
 // ---------------------------------------------------------------------------
 
 Then("the expense API last response status should be {int}", (code) => {
-  expect(state.lastResponse.status).to.eq(parseInt(code, 10));
+  const expected = parseInt(code, 10);
+  expect(
+    state.lastResponse.status,
+    `expected HTTP ${expected}, body=${JSON.stringify(state.lastResponse.body)}`,
+  ).to.eq(expected);
 });
 
 Then("I store the created Purchase Invoice name from the response", () => {

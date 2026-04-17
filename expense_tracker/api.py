@@ -306,6 +306,9 @@ def frappe_client_submit(user):
                 frappe.db.set_value(
                     "Purchase Invoice", name, "title", expense_title, update_modified=False
                 )
+            # Ensure DB writes (e.g. title) are visible before load; avoids rare submit/read races.
+            frappe.db.commit()
+            frappe.clear_document_cache("Purchase Invoice", name)
 
             doc = frappe.get_doc("Purchase Invoice", name)
             doc.flags.ignore_permissions = True
@@ -337,7 +340,7 @@ def frappe_client_submit(user):
             frappe.db.commit()
             logger.info("SUBMIT: success name=%s docstatus=%s user=%s", name, doc.docstatus, user)
             # ERPNext sets doc.status to payment workflow (e.g. "Unpaid"); clients use docstatus.
-            return {"success": True, "docstatus": doc.docstatus, "name": doc.name}
+            return {"success": True, "docstatus": int(doc.docstatus), "name": doc.name}
 
         _app_db().get_doc(doctype, name, verify_tenant=True)
         logger.info("SUBMIT (frappe.client.submit): %s %s user=%s", doctype, name, user)
