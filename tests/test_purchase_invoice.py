@@ -452,6 +452,36 @@ def test_dashboard_summary_falls_back_to_session_user_default():
     assert first_query_filters[0] == ["company", "=", "Session Co Pty Ltd"]
 
 
+def test_dashboard_summary_fallbacks_to_invoice_level_item_group_when_child_query_empty():
+    mock_frappe.defaults = MagicMock()
+    mock_frappe.defaults.get_user_default.return_value = "Acme Pty Ltd"
+    mock_app.db.get_value.return_value = "AUD"
+    mock_app.db.get_all.side_effect = [
+        [
+            {
+                "name": "PI-1",
+                "grand_total": 120.0,
+                "total_taxes_and_charges": 10.0,
+                "expense_item_group": "Office Supplies",
+            },
+            {
+                "name": "PI-2",
+                "grand_total": 80.0,
+                "total_taxes_and_charges": 0.0,
+                "expense_item_group": "Travel",
+            },
+        ],
+        [],
+    ]
+
+    result = get_dashboard_summary("test_user")
+
+    assert result["total_spend"] == 200.0
+    assert len(result["breakdown"]) == 2
+    assert result["breakdown"][0]["item_group"] == "Office Supplies"
+    assert result["breakdown"][0]["total"] == 120.0
+
+
 class _FakeArgs:
     def __init__(self, data):
         self._data = data

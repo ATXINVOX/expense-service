@@ -942,6 +942,14 @@ def get_dashboard_summary(user, from_date=None, to_date=None):
                 # Backward-compat for mocks/older adapters that may still return raw rows.
                 total = row.get("amount")
             breakdown[item_group] = breakdown.get(item_group, 0.0) + _as_number(total)
+        if not breakdown:
+            # Fallback for environments where child table aggregation is restricted/empty:
+            # aggregate by the controller-populated primary item group on Purchase Invoice.
+            for row in invoices or []:
+                item_group = row.get("expense_item_group") or "Uncategorised"
+                breakdown[item_group] = breakdown.get(item_group, 0.0) + _as_number(
+                    row.get("grand_total")
+                )
 
     total_spend = sum(_as_number(row.get("grand_total")) for row in invoices or [])
     gst_total = sum(_as_number(row.get("total_taxes_and_charges")) for row in invoices or [])
