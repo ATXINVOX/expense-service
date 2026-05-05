@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import calendar
+import datetime as _dt
 import logging
 import re
 from datetime import date, datetime, timedelta
@@ -94,16 +95,20 @@ _CATEGORY_COLOR_PALETTE = (
 
 
 def _parse_posting_date_value(pd):
-    """Normalize Purchase Invoice ``posting_date`` to a ``date`` or ``None``."""
+    """Normalize Purchase Invoice ``posting_date`` to a ``date`` or ``None``.
+
+    Uses ``datetime.date`` from the stdlib module for ``isinstance`` so tests can
+    patch ``expense_tracker.api.date`` without breaking recognition of DB dates.
+    """
     if pd is None:
         return None
-    if isinstance(pd, datetime):
+    if isinstance(pd, _dt.datetime):
         return pd.date()
-    if isinstance(pd, date):
+    if isinstance(pd, _dt.date):
         return pd
     if isinstance(pd, str):
         try:
-            return datetime.fromisoformat(pd.replace("Z", "+00:00")).date()
+            return _dt.datetime.fromisoformat(pd.replace("Z", "+00:00")).date()
         except Exception:
             return None
     return None
