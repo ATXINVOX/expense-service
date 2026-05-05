@@ -1,0 +1,199 @@
+{
+  "meta": {
+    "title": "Expense dashboard API — contract & HTTP scenarios",
+    "version": "1.1",
+    "endpoint": "GET /api/method/expense_tracker.api.get_dashboard_summary",
+    "auth": "Frappe session via X-Frappe-SID (and Cookie sid if your gateway expects it). Company from user defaults — no company query param.",
+    "response_wrapping": "Expense microservice returns the dashboard object at the JSON root. Some gateways may wrap as { \"message\": { ... } }; clients should accept both.",
+    "query_parameters": {
+      "period": {
+        "optional": true,
+        "values": ["week", "month", "year"],
+        "notes": "Case-insensitive after trim. When set, adds preset, from_date, to_date, compare_period_label, trend_pct, previous_period_total, top_category, cashflow, cashflow_stats, and enriches breakdown with pct and color. Explicit from_date/to_date on the URL are ignored for preset requests."
+      },
+      "from_date_to_date": {
+        "optional": true,
+        "when": "Only when period is omitted",
+        "notes": "Legacy behaviour: defaults to first day of current month through today if omitted."
+      }
+    },
+    "period_windows": {
+      "week": "Monday–Sunday containing today; trend vs prior full week.",
+      "month": "First day of month through today (MTD); trend vs same calendar span in previous month.",
+      "year": "Jan 1 through today (YTD); trend vs same calendar span in previous year."
+    },
+    "cashflow_buckets": {
+      "week": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+      "month": ["W1", "W2", "W3", "W4"],
+      "month_segment_rule": "By day-of-month: 1–7 → W1, 8–14 → W2, 15–21 → W3, 22+ → W4 (within MTD range).",
+      "year": ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    },
+    "edge_cases_manual": [
+      "No Purchase Invoices in range: total_spend 0, breakdown [], preset cashflow buckets all 0, trend_pct 0 when previous also 0.",
+      "Single category only: one breakdown row with pct 100.",
+      "Very large amounts: numeric floats (client formatting K/M is UI-only)."
+    ]
+  },
+  "cases": [
+    {
+      "id": "DASH-01-legacy-no-period",
+      "title": "Legacy dashboard — month-to-date (no period param)",
+      "tags": ["happy_path", "legacy"],
+      "request": {
+        "method": "GET",
+        "path": "/api/method/expense_tracker.api.get_dashboard_summary",
+        "headers": {
+          "X-Frappe-SID": "{{SID}}",
+          "Accept": "application/json"
+        }
+      },
+      "expect": {
+        "http_status": 200,
+        "payload_keys_subset": ["total_spend", "gst_total", "currency", "period", "breakdown"]
+      }
+    },
+    {
+      "id": "DASH-02-preset-week",
+      "title": "Dashboard preset week — Mon–Sun cashflow + trend",
+      "tags": ["happy_path", "preset", "week"],
+      "request": {
+        "method": "GET",
+        "path": "/api/method/expense_tracker.api.get_dashboard_summary?period=week",
+        "headers": {
+          "X-Frappe-SID": "{{SID}}",
+          "Accept": "application/json"
+        }
+      },
+      "expect": {
+        "http_status": 200,
+        "payload_keys_subset": [
+          "preset",
+          "cashflow",
+          "cashflow_stats",
+          "trend_pct",
+          "compare_period_label",
+          "from_date",
+          "to_date",
+          "breakdown"
+        ]
+      }
+    },
+    {
+      "id": "DASH-03-preset-month",
+      "title": "Dashboard preset month — MTD + W1–W4 segments",
+      "tags": ["happy_path", "preset", "month"],
+      "request": {
+        "method": "GET",
+        "path": "/api/method/expense_tracker.api.get_dashboard_summary?period=month",
+        "headers": {
+          "X-Frappe-SID": "{{SID}}",
+          "Accept": "application/json"
+        }
+      },
+      "expect": {
+        "http_status": 200,
+        "payload_keys_subset": ["preset", "cashflow", "cashflow_stats", "top_category"]
+      }
+    },
+    {
+      "id": "DASH-04-preset-year",
+      "title": "Dashboard preset year — YTD + monthly buckets",
+      "tags": ["happy_path", "preset", "year"],
+      "request": {
+        "method": "GET",
+        "path": "/api/method/expense_tracker.api.get_dashboard_summary?period=year",
+        "headers": {
+          "X-Frappe-SID": "{{SID}}",
+          "Accept": "application/json"
+        }
+      },
+      "expect": {
+        "http_status": 200,
+        "payload_keys_subset": ["preset", "cashflow", "cashflow_stats"]
+      }
+    },
+    {
+      "id": "DASH-05-period-case-insensitive",
+      "title": "period=WEEK upper-case — normalised to week preset",
+      "tags": ["preset", "normalisation"],
+      "request": {
+        "method": "GET",
+        "path": "/api/method/expense_tracker.api.get_dashboard_summary?period=WEEK",
+        "headers": {
+          "X-Frappe-SID": "{{SID}}",
+          "Accept": "application/json"
+        }
+      },
+      "expect": {
+        "http_status": 200,
+        "payload_equals": { "preset": "week" }
+      }
+    },
+    {
+      "id": "DASH-06-period-empty-query",
+      "title": "Empty period value — treated as legacy (no preset)",
+      "tags": ["legacy", "edge"],
+      "request": {
+        "method": "GET",
+        "path": "/api/method/expense_tracker.api.get_dashboard_summary?period=",
+        "headers": {
+          "X-Frappe-SID": "{{SID}}",
+          "Accept": "application/json"
+        }
+      },
+      "expect": {
+        "http_status": 200,
+        "payload_must_not_have_keys": ["preset", "cashflow"]
+      }
+    },
+    {
+      "id": "DASH-07-invalid-period",
+      "title": "Invalid period — validation error (not 200)",
+      "tags": ["negative", "validation"],
+      "request": {
+        "method": "GET",
+        "path": "/api/method/expense_tracker.api.get_dashboard_summary?period=quarter",
+        "headers": {
+          "X-Frappe-SID": "{{SID}}",
+          "Accept": "application/json"
+        }
+      },
+      "expect": {
+        "http_status": [400, 417, 422]
+      }
+    },
+    {
+      "id": "DASH-08-legacy-custom-dates",
+      "title": "Legacy with explicit from_date and to_date (no period)",
+      "tags": ["legacy", "range"],
+      "notes": "Requires framework to pass query params into the handler; if ignored, response still 200 with default MTD window.",
+      "request": {
+        "method": "GET",
+        "path": "/api/method/expense_tracker.api.get_dashboard_summary?from_date=2026-01-01&to_date=2026-01-31",
+        "headers": {
+          "X-Frappe-SID": "{{SID}}",
+          "Accept": "application/json"
+        }
+      },
+      "expect": {
+        "http_status": 200,
+        "payload_keys_subset": ["total_spend", "breakdown"]
+      }
+    },
+    {
+      "id": "DASH-09-no-session",
+      "title": "Missing session — unauthorised",
+      "tags": ["negative", "auth"],
+      "request": {
+        "method": "GET",
+        "path": "/api/method/expense_tracker.api.get_dashboard_summary?period=month",
+        "headers": {
+          "Accept": "application/json"
+        }
+      },
+      "expect": {
+        "http_status": [401, 403]
+      }
+    }
+  ]
+}

@@ -81,6 +81,162 @@ def _period_label(from_date: date, to_date: date) -> str:
     return f"{from_date.strftime('%B %Y')} - {to_date.strftime('%B %Y')}"
 
 
+_CATEGORY_COLOR_PALETTE = (
+    "#2563EB",
+    "#DC2626",
+    "#9333EA",
+    "#EA580C",
+    "#16A34A",
+    "#06B6D4",
+    "#64748B",
+    "#F59E0B",
+)
+
+
+def _parse_posting_date_value(pd):
+    """Normalize Purchase Invoice ``posting_date`` to a ``date`` or ``None``."""
+    if pd is None:
+        return None
+    if isinstance(pd, datetime):
+        return pd.date()
+    if isinstance(pd, date):
+        return pd
+    if isinstance(pd, str):
+        try:
+            return datetime.fromisoformat(pd.replace("Z", "+00:00")).date()
+        except Exception:
+            return None
+    return None
+
+
+def _monday_week_start(d: date) -> date:
+    return d - timedelta(days=d.weekday())
+
+
+def _dashboard_week_bounds(d: date):
+    mon = _monday_week_start(d)
+    sun = mon + timedelta(days=6)
+    return mon, sun
+
+
+def _dashboard_prior_week_bounds(d: date):
+    mon, _ = _dashboard_week_bounds(d)
+    prev_mon = mon - timedelta(days=7)
+    prev_sun = mon - timedelta(days=1)
+    return prev_mon, prev_sun
+
+
+def _dashboard_month_mtd_bounds(d: date):
+    return d.replace(day=1), d
+
+
+def _dashboard_prior_month_mtd_bounds(d: date):
+    first_this = d.replace(day=1)
+    last_prev = first_this - timedelta(days=1)
+    py, pm = last_prev.year, last_prev.month
+    prev_start = date(py, pm, 1)
+    last_dom = calendar.monthrange(py, pm)[1]
+    target_day = min(d.day, last_dom)
+    prev_end = date(py, pm, target_day)
+    return prev_start, prev_end
+
+
+def _dashboard_year_ytd_bounds(d: date):
+    return date(d.year, 1, 1), d
+
+
+def _dashboard_prior_year_ytd_bounds(d: date):
+    y = d.year - 1
+    last_dom = calendar.monthrange(y, d.month)[1]
+    dom = min(d.day, last_dom)
+    return date(y, 1, 1), date(y, d.month, dom)
+
+
+def _resolve_dashboard_period(preset: str, today: date):
+    """Main window, comparison window, and UI labels (preset is week|month|year)."""
+    p = (preset or "").strip().lower()
+    if p == "week":
+        fd, td = _dashboard_week_bounds(today)
+        pfd, ptd = _dashboard_prior_week_bounds(today)
+        label = f"Week of {fd.strftime('%d %b %Y')}"
+        cmp_label = "vs last week"
+        return fd, td, pfd, ptd, label, cmp_label
+    if p == "month":
+        fd, td = _dashboard_month_mtd_bounds(today)
+        pfd, ptd = _dashboard_prior_month_mtd_bounds(today)
+        label = td.strftime("%B %Y")
+        cmp_label = "vs last month"
+        return fd, td, pfd, ptd, label, cmp_label
+    if p == "year":
+        fd, td = _dashboard_year_ytd_bounds(today)
+        pfd, ptd = _dashboard_prior_year_ytd_bounds(today)
+        label = str(today.year)
+        cmp_label = "vs last year"
+        return fd, td, pfd, ptd, label, cmp_label
+    raise AssertionError("invalid preset for _resolve_dashboard_period")
+
+
+def _trend_pct_vs_previous(current_total: float, previous_total: float) -> float:
+    if previous_total > 0:
+        return round((current_total - previous_total) / previous_total * 100.0, 2)
+    if current_total > 0:
+        return 100.0
+    return 0.0
+
+
+def _cashflow_stats_from_amounts(amounts: list[float]) -> dict:
+    if not amounts:
+        return {"highest": 0.0, "lowest": 0.0, "average": 0.0}
+    return {
+        "highest": round(max(amounts), 2),
+        "lowest": round(min(amounts), 2),
+        "average": round(sum(amounts) / len(amounts), 2),
+    }
+
+
+def _cashflow_week_series(rows, week_start: date) -> list[dict]:
+    labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    buckets = [0.0] * 7
+    for row in rows or []:
+        pd = _parse_posting_date_value(row.get("posting_date"))
+        if not pd:
+            continue
+        idx = (pd - week_start).days
+        if 0 <= idx <= 6:
+            buckets[idx] += _as_number(row.get("grand_total"))
+    return [{"label": labels[i], "amount": round(buckets[i], 2)} for i in range(7)]
+
+
+def _cashflow_month_week_segments(rows, range_start: date, range_end: date) -> list[dict]:
+    labels = ["W1", "W2", "W3", "W4"]
+    buckets = [0.0, 0.0, 0.0, 0.0]
+    for row in rows or []:
+        pd = _parse_posting_date_value(row.get("posting_date"))
+        if not pd or pd < range_start or pd > range_end:
+            continue
+        dom = pd.day
+        if dom <= 7:
+            buckets[0] += _as_number(row.get("grand_total"))
+        elif dom <= 14:
+            buckets[1] += _as_number(row.get("grand_total"))
+        elif dom <= 21:
+            buckets[2] += _as_number(row.get("grand_total"))
+        else:
+            buckets[3] += _as_number(row.get("grand_total"))
+    return [{"label": labels[i], "amount": round(buckets[i], 2)} for i in range(4)]
+
+
+def _cashflow_year_months(rows, year: int, range_end: date) -> list[dict]:
+    months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    buckets = [0.0] * 12
+    for row in rows or []:
+        pd = _parse_posting_date_value(row.get("posting_date"))
+        if not pd or pd.year != year or pd > range_end:
+            continue
+        buckets[pd.month - 1] += _as_number(row.get("grand_total"))
+    return [{"label": months[i], "amount": round(buckets[i], 2)} for i in range(12)]
+
+
 def _invoice_filters(company: str, from_date: date, to_date: date):
     return [
         ["company", "=", company],
@@ -666,26 +822,58 @@ def delete_purchase_invoice(user, name):
 
 @get_app().secure_route('/api/method/expense_tracker.api.get_dashboard_summary', methods=['GET'])
 def get_dashboard_summary(user, from_date=None, to_date=None):
+    """Purchase Invoice aggregates for the tenant company.
+
+    Without ``period``: legacy month-to-date (1st of month → today) via ``from_date`` /
+    ``to_date`` defaults.
+
+    With ``GET ... ?period=week|month|year``: preset windows, trend vs prior window,
+    cashflow buckets for charts, ``pct`` / ``color`` on breakdown rows.
+    """
+    from flask import request
+
     db = _app_db()
     company = _resolve_company()
     if not company:
         frappe.throw("Company is required")
 
-    from_date = _safe_date(from_date, _default_from_date)
-    to_date = _safe_date(to_date, date.today)
+    raw_period = request.args.get("period")
+    if isinstance(raw_period, str):
+        period_preset = raw_period.strip().lower()
+    else:
+        period_preset = ""
+    if period_preset and period_preset not in ("week", "month", "year"):
+        frappe.throw("period must be one of: week, month, year")
+    use_preset = period_preset in ("week", "month", "year")
 
-    if not from_date or not to_date:
-        from_date = _default_from_date()
-        to_date = date.today()
+    if use_preset:
+        today = date.today()
+        from_date, to_date, prev_from, prev_to, period_display, compare_label = (
+            _resolve_dashboard_period(period_preset, today)
+        )
+    else:
+        prev_from = prev_to = None
+        compare_label = None
+        period_display = None
+        from_date = _safe_date(from_date, _default_from_date)
+        to_date = _safe_date(to_date, date.today)
 
-    if from_date > to_date:
-        from_date, to_date = to_date, from_date
+        if not from_date or not to_date:
+            from_date = _default_from_date()
+            to_date = date.today()
+
+        if from_date > to_date:
+            from_date, to_date = to_date, from_date
 
     filters = _invoice_filters(company, from_date, to_date)
+    inv_fields = ["name", "grand_total", "total_taxes_and_charges"]
+    if use_preset:
+        inv_fields.append("posting_date")
+
     invoices = db.get_all(
         "Purchase Invoice",
         filters=filters,
-        fields=["name", "grand_total", "total_taxes_and_charges"],
+        fields=inv_fields,
     )
 
     breakdown = {}
@@ -705,18 +893,76 @@ def get_dashboard_summary(user, from_date=None, to_date=None):
 
     currency = db.get_value("Company", company, "default_currency") or "AUD"
 
-    return {
+    breakdown_rows = [
+        {"item_group": item_group, "total": total}
+        for item_group, total in sorted(
+            breakdown.items(), key=lambda item: item[1], reverse=True
+        )
+    ]
+
+    period_label_out = (
+        period_display if use_preset else _period_label(from_date, to_date)
+    )
+
+    result = {
         "total_spend": total_spend,
         "gst_total": gst_total,
         "currency": currency,
-        "period": _period_label(from_date, to_date),
-        "breakdown": [
-            {"item_group": item_group, "total": total}
-            for item_group, total in sorted(
-                breakdown.items(), key=lambda item: item[1], reverse=True
-            )
-        ],
+        "period": period_label_out,
+        "breakdown": breakdown_rows,
     }
+
+    if use_preset:
+        prev_total = 0.0
+        if prev_from and prev_to:
+            prev_filters = _invoice_filters(company, prev_from, prev_to)
+            prev_rows = db.get_all(
+                "Purchase Invoice",
+                filters=prev_filters,
+                fields=["grand_total"],
+            )
+            prev_total = sum(_as_number(r.get("grand_total")) for r in prev_rows or [])
+
+        trend_pct = _trend_pct_vs_previous(total_spend, prev_total)
+        top_row = breakdown_rows[0] if breakdown_rows else None
+
+        enriched_breakdown = []
+        for idx, row in enumerate(breakdown_rows):
+            tot = _as_number(row.get("total"))
+            pct = round((tot / total_spend * 100.0), 2) if total_spend > 0 else 0.0
+            color = _CATEGORY_COLOR_PALETTE[idx % len(_CATEGORY_COLOR_PALETTE)]
+            enriched_breakdown.append({**row, "pct": pct, "color": color})
+
+        if period_preset == "week":
+            week_start, _ = _dashboard_week_bounds(from_date)
+            cashflow = _cashflow_week_series(invoices, week_start)
+        elif period_preset == "month":
+            cashflow = _cashflow_month_week_segments(invoices, from_date, to_date)
+        else:
+            cashflow = _cashflow_year_months(invoices, from_date.year, to_date)
+
+        cf_amounts = [b["amount"] for b in cashflow]
+
+        result.update(
+            {
+                "preset": period_preset,
+                "from_date": from_date.isoformat(),
+                "to_date": to_date.isoformat(),
+                "compare_period_label": compare_label,
+                "trend_pct": trend_pct,
+                "previous_period_total": round(prev_total, 2),
+                "top_category": (
+                    {"item_group": top_row["item_group"], "total": top_row["total"]}
+                    if top_row
+                    else None
+                ),
+                "cashflow": cashflow,
+                "cashflow_stats": _cashflow_stats_from_amounts(cf_amounts),
+                "breakdown": enriched_breakdown,
+            }
+        )
+
+    return result
 
 
 @get_app().secure_route(
