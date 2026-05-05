@@ -242,6 +242,33 @@ def _cashflow_year_months(rows, year: int, range_end: date) -> list[dict]:
     return [{"label": months[i], "amount": round(buckets[i], 2)} for i in range(12)]
 
 
+def _recent_expenses_from_rows(rows, limit: int = 10) -> list[dict]:
+    """Project dashboard recent expenses from Purchase Invoice list rows."""
+
+    def _posting_key(row):
+        pd = _parse_posting_date_value(row.get("posting_date"))
+        return pd or _dt.date.min
+
+    ordered = sorted(rows or [], key=_posting_key, reverse=True)
+    out = []
+    for row in ordered[: max(1, min(int(limit or 10), 50))]:
+        out.append(
+            {
+                "id": row.get("name"),
+                "name": row.get("name"),
+                "supplier": row.get("supplier"),
+                "posting_date": _fmt_api_date(row.get("posting_date")),
+                "status": row.get("status"),
+                "amount": _as_number(row.get("grand_total")),
+                "currency": row.get("currency"),
+                "remarks": row.get("remarks"),
+                "item_name": row.get("expense_item_name"),
+                "item_group": row.get("expense_item_group") or "Uncategorised",
+            }
+        )
+    return out
+
+
 def _invoice_filters(company: str, from_date: date, to_date: date):
     return [
         ["company", "=", company],
@@ -850,6 +877,11 @@ def get_dashboard_summary(user, from_date=None, to_date=None):
     if period_preset and period_preset not in ("week", "month", "year"):
         frappe.throw("period must be one of: week, month, year")
     use_preset = period_preset in ("week", "month", "year")
+    try:
+        recent_limit = int(request.args.get("recent_limit") or 10)
+    except (TypeError, ValueError):
+        recent_limit = 10
+    recent_limit = max(1, min(recent_limit, 50))
 
     if use_preset:
         today = date.today()
@@ -871,9 +903,18 @@ def get_dashboard_summary(user, from_date=None, to_date=None):
             from_date, to_date = to_date, from_date
 
     filters = _invoice_filters(company, from_date, to_date)
-    inv_fields = ["name", "grand_total", "total_taxes_and_charges"]
-    if use_preset:
-        inv_fields.append("posting_date")
+    inv_fields = [
+        "name",
+        "supplier",
+        "posting_date",
+        "status",
+        "grand_total",
+        "total_taxes_and_charges",
+        "currency",
+        "remarks",
+        "expense_item_name",
+        "expense_item_group",
+    ]
 
     invoices = db.get_all(
         "Purchase Invoice",
@@ -886,12 +927,21 @@ def get_dashboard_summary(user, from_date=None, to_date=None):
         invoice_names = [row.get("name") for row in invoices]
         invoice_items = db.get_all(
             "Purchase Invoice Item",
-            filters=[["parent", "in", invoice_names]],
-            fields=["item_group", "amount"],
+            filters=[
+                ["parenttype", "=", "Purchase Invoice"],
+                ["parent", "in", invoice_names],
+            ],
+            # Let DB perform category aggregation; Python keeps only normalization.
+            fields=["item_group", "sum(amount) as total"],
+            group_by="item_group",
         )
         for row in invoice_items or []:
             item_group = row.get("item_group") or "Uncategorised"
-            breakdown[item_group] = breakdown.get(item_group, 0.0) + _as_number(row.get("amount"))
+            total = row.get("total")
+            if total is None:
+                # Backward-compat for mocks/older adapters that may still return raw rows.
+                total = row.get("amount")
+            breakdown[item_group] = breakdown.get(item_group, 0.0) + _as_number(total)
 
     total_spend = sum(_as_number(row.get("grand_total")) for row in invoices or [])
     gst_total = sum(_as_number(row.get("total_taxes_and_charges")) for row in invoices or [])
@@ -915,6 +965,7 @@ def get_dashboard_summary(user, from_date=None, to_date=None):
         "currency": currency,
         "period": period_label_out,
         "breakdown": breakdown_rows,
+        "recent_expenses": _recent_expenses_from_rows(invoices, recent_limit),
     }
 
     if use_preset:
