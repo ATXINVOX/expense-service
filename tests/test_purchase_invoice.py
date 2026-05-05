@@ -460,6 +460,17 @@ class _FakeArgs:
         return self._data.get(key, default)
 
 
+def _date_class_with_fixed_today(fixed: date):
+    """Patch target for ``expense_tracker.api.date`` — Python 3.14+ cannot patch ``date.today`` on builtins."""
+
+    class _DateFixedToday(date):
+        @classmethod
+        def today(cls):
+            return fixed
+
+    return _DateFixedToday
+
+
 def test_dashboard_summary_preset_month_cashflow_and_trend():
     fixed_today = date(2026, 5, 7)
     sys.modules["flask"].request.args = _FakeArgs({"period": "month"})
@@ -467,7 +478,7 @@ def test_dashboard_summary_preset_month_cashflow_and_trend():
     mock_frappe.defaults.get_user_default.return_value = "Acme Pty Ltd"
     mock_app.db.get_value.return_value = "AUD"
 
-    with patch("expense_tracker.api.date.today", return_value=fixed_today):
+    with patch("expense_tracker.api.date", _date_class_with_fixed_today(fixed_today)):
         mock_app.db.get_all.side_effect = [
             [
                 {
@@ -508,7 +519,7 @@ def test_dashboard_summary_preset_week_uppercase_period():
     mock_frappe.defaults.get_user_default.return_value = "Acme Pty Ltd"
     mock_app.db.get_value.return_value = "AUD"
 
-    with patch("expense_tracker.api.date.today", return_value=fixed_today):
+    with patch("expense_tracker.api.date", _date_class_with_fixed_today(fixed_today)):
         mock_app.db.get_all.side_effect = [
             [
                 {
