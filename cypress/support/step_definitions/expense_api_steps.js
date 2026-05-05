@@ -224,6 +224,31 @@ When("I GET the dashboard summary", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Financial dashboard (income vs expense, date-wise)
+// ---------------------------------------------------------------------------
+
+When("I GET the financial dashboard", () => {
+  cy.request({
+    method: "GET",
+    url: `${serviceBaseUrl()}/api/method/expense_tracker.api.get_financial_dashboard`,
+    headers: sessionHeaders(),
+    failOnStatusCode: false,
+  }).then((res) => { state.lastResponse = res; });
+});
+
+When("I GET the financial dashboard with query {string}", (queryString) => {
+  const q = (queryString || "").trim();
+  const base = `${serviceBaseUrl()}/api/method/expense_tracker.api.get_financial_dashboard`;
+  const url = q ? `${base}?${q}` : base;
+  cy.request({
+    method: "GET",
+    url,
+    headers: sessionHeaders(),
+    failOnStatusCode: false,
+  }).then((res) => { state.lastResponse = res; });
+});
+
+// ---------------------------------------------------------------------------
 // Assertions
 // ---------------------------------------------------------------------------
 
@@ -279,4 +304,49 @@ Then("the response body field {string} should be {int}", (field, expected) => {
 Then("the dashboard response should have a total_spend field", () => {
   expect(state.lastResponse.body).to.have.property("total_spend");
   expect(state.lastResponse.body.total_spend).to.be.a("number");
+});
+
+Then("the financial dashboard response should expose analytics fields", () => {
+  const b = state.lastResponse.body;
+  expect(b, `body=${JSON.stringify(b)}`).to.be.an("object");
+  expect(b).to.have.property("daily");
+  expect(b.daily).to.be.an("array");
+  expect(b).to.have.property("totals");
+  expect(b.totals).to.include.keys("income", "expense", "net");
+  expect(b).to.have.property("recent_activity");
+  expect(b.recent_activity).to.be.an("array");
+  expect(b).to.have.property("preset");
+  expect(b).to.have.property("from_date");
+  expect(b).to.have.property("to_date");
+  expect(b).to.have.property("resource_api");
+  expect(b).to.have.property("currency");
+  expect(b).to.have.property("company");
+});
+
+Then("each daily row should include income expense and net", () => {
+  const rows = state.lastResponse.body.daily || [];
+  expect(
+    rows.length,
+    "daily should include at least one day for the selected period",
+  ).to.be.at.least(1);
+  for (const row of rows) {
+    expect(row).to.include.keys("date", "income", "expense", "net");
+  }
+});
+
+Then("the financial dashboard preset should be {string}", (preset) => {
+  expect(state.lastResponse.body.preset).to.eq(preset);
+});
+
+Then("the financial dashboard daily length should be {int}", (n) => {
+  const expected = parseInt(n, 10);
+  expect(state.lastResponse.body.daily.length).to.eq(expected);
+});
+
+Then("the financial dashboard recent activity should have resource paths when non-empty", () => {
+  const items = state.lastResponse.body.recent_activity || [];
+  for (const row of items) {
+    expect(row).to.have.property("resource_path");
+    expect(String(row.resource_path)).to.match(/^\/api\/resource\//);
+  }
 });

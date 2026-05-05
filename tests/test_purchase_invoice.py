@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from types import ModuleType
 from unittest.mock import MagicMock
@@ -103,9 +103,14 @@ from expense_tracker.api import (
     delete_purchase_invoice,
     frappe_client_submit,
     get_dashboard_summary,
+    get_financial_dashboard,
     get_purchase_invoice,
+    _add_months,
+    _aggregate_by_posting_date,
     _app_db,
+    _daily_series,
     _project_purchase_invoice_api,
+    _resolve_financial_period,
 )
 
 
@@ -445,6 +450,248 @@ def test_dashboard_summary_falls_back_to_session_user_default():
 
     first_query_filters = mock_app.tenant_db.get_all.call_args_list[0].kwargs.get("filters")
     assert first_query_filters[0] == ["company", "=", "Session Co Pty Ltd"]
+
+
+class _FakeArgs:
+    def __init__(self, data):
+        self._data = data
+
+    def get(self, key, default=None):
+        return self._data.get(key, default)
+
+
+def test_financial_dashboard_custom_daily_totals_and_activity():
+    mock_frappe.defaults = MagicMock()
+    mock_frappe.defaults.get_user_default.return_value = "Acme Pty Ltd"
+
+    sys.modules["flask"].request.args = _FakeArgs(
+        {
+            "preset": "custom",
+            "from_date": "2026-05-01",
+            "to_date": "2026-05-03",
+            "activity_limit": "5",
+        }
+    )
+
+    def financial_get_all(doctype, *args, **kwargs):
+        if kwargs.get("order_by"):
+            if doctype == "Sales Invoice":
+                return [
+                    {
+                        "name": "SINV-1",
+                        "customer": "Cust A",
+                        "posting_date": date(2026, 5, 1),
+                        "grand_total": 100.0,
+                        "modified": datetime(2026, 5, 4, 10, 0, 0),
+                        "status": "Paid",
+                    },
+                ]
+            if doctype == "Purchase Invoice":
+                return [
+                    {
+                        "name": "PINV-1",
+                        "supplier": "Sup B",
+                        "posting_date": date(2026, 5, 2),
+                        "grand_total": 40.0,
+                        "modified": datetime(2026, 5, 4, 11, 0, 0),
+                        "status": "Draft",
+                    },
+                ]
+            return []
+        if doctype == "Sales Invoice":
+            return [
+                {"name": "SINV-1", "posting_date": date(2026, 5, 1), "grand_total": 100.0},
+                {"name": "SINV-2", "posting_date": date(2026, 5, 3), "grand_total": 50.0},
+            ]
+        if doctype == "Purchase Invoice":
+            return [
+                {"name": "PINV-1", "posting_date": date(2026, 5, 2), "grand_total": 40.0},
+            ]
+        return []
+
+    mock_app.tenant_db.get_all.side_effect = financial_get_all
+    mock_frappe.db.get_value.return_value = "AUD"
+
+    result = get_financial_dashboard("test_user")
+
+    assert result["preset"] == "custom"
+    assert result["from_date"] == "2026-05-01"
+    assert result["totals"]["income"] == 150.0
+    assert result["totals"]["expense"] == 40.0
+    assert result["totals"]["net"] == 110.0
+    assert len(result["daily"]) == 3
+    assert result["daily"][0]["date"] == "2026-05-01"
+    assert result["daily"][0]["income"] == 100.0
+    assert result["daily"][0]["expense"] == 0.0
+    assert result["daily"][1]["expense"] == 40.0
+    assert result["daily"][2]["income"] == 50.0
+    assert len(result["recent_activity"]) <= 5
+    assert result["recent_activity"][0]["doctype"] == "Purchase Invoice"
+    assert "/api/resource/Purchase%20Invoice/" in result["recent_activity"][0]["resource_path"]
+
+
+def test_financial_dashboard_custom_requires_dates():
+    mock_frappe.defaults = MagicMock()
+    mock_frappe.defaults.get_user_default.return_value = "Acme Pty Ltd"
+    sys.modules["flask"].request.args = _FakeArgs({"preset": "custom"})
+
+    mock_app.tenant_db.get_all.return_value = []
+
+    with pytest.raises(RuntimeError, match="from_date and to_date"):
+        get_financial_dashboard("test_user")
+
+
+def test_resolve_financial_period_last_7_days():
+    fd, td, label = _resolve_financial_period("last_7_days", None, None)
+    assert label == "last_7_days"
+    assert td == date.today()
+    assert fd == td - timedelta(days=6)
+
+
+def test_resolve_financial_period_last_6_months():
+    fd, td, label = _resolve_financial_period("last_6_months", None, None)
+    assert label == "last_6_months"
+    assert td == date.today()
+    assert fd == _add_months(date.today(), -6)
+
+
+def test_resolve_financial_period_preset_aliases_match_canonical():
+    a_fd, a_td, _ = _resolve_financial_period("7d", None, None)
+    b_fd, b_td, _ = _resolve_financial_period("last_7_days", None, None)
+    assert (a_fd, a_td) == (b_fd, b_td)
+
+
+def test_resolve_financial_period_invalid_preset_raises():
+    with pytest.raises(RuntimeError, match="preset must be one of"):
+        _resolve_financial_period("year_to_date", None, None)
+
+
+def test_resolve_financial_period_custom_swaps_inverted_dates():
+    fd, td, label = _resolve_financial_period("custom", "2026-05-10", "2026-05-01")
+    assert label == "custom"
+    assert fd.isoformat() == "2026-05-01"
+    assert td.isoformat() == "2026-05-10"
+
+
+def test_resolve_financial_period_custom_span_over_732_days_raises():
+    with pytest.raises(RuntimeError, match="732"):
+        _resolve_financial_period("custom", "2024-01-01", "2026-05-05")
+
+
+def test_aggregate_by_posting_date_handles_iso_datetime_strings():
+    buckets = _aggregate_by_posting_date(
+        [{"posting_date": "2026-03-01T00:00:00", "grand_total": "10.5"}],
+        "grand_total",
+    )
+    assert buckets.get("2026-03-01") == 10.5
+
+
+def test_daily_series_includes_all_calendar_days():
+    income = {"2026-01-02": 100.0}
+    expense = {"2026-01-03": 25.0}
+    series = _daily_series(date(2026, 1, 1), date(2026, 1, 3), income, expense)
+    assert len(series) == 3
+    assert series[0]["date"] == "2026-01-01"
+    assert series[0]["income"] == 0.0
+    assert series[1]["income"] == 100.0
+    assert series[2]["expense"] == 25.0
+    assert series[2]["net"] == -25.0
+
+
+def test_financial_dashboard_activity_limit_is_capped_at_50():
+    mock_frappe.defaults = MagicMock()
+    mock_frappe.defaults.get_user_default.return_value = "Acme Pty Ltd"
+    sys.modules["flask"].request.args = _FakeArgs(
+        {
+            "preset": "custom",
+            "from_date": "2026-05-01",
+            "to_date": "2026-05-01",
+            "activity_limit": "99",
+        }
+    )
+
+    def financial_get_all(doctype, *args, **kwargs):
+        if kwargs.get("order_by"):
+            lim = kwargs.get("limit", 20)
+            if doctype == "Sales Invoice":
+                return [
+                    {
+                        "name": f"S-{i}",
+                        "customer": "C",
+                        "posting_date": date(2026, 5, 1),
+                        "grand_total": 1.0,
+                        "modified": datetime(2026, 5, 1, 1, i % 60, 0),
+                        "status": "Draft",
+                    }
+                    for i in range(lim)
+                ]
+            if doctype == "Purchase Invoice":
+                return [
+                    {
+                        "name": f"P-{i}",
+                        "supplier": "S",
+                        "posting_date": date(2026, 5, 1),
+                        "grand_total": 2.0,
+                        "modified": datetime(2026, 5, 1, 2, i % 60, 0),
+                        "status": "Draft",
+                    }
+                    for i in range(lim)
+                ]
+        return []
+
+    mock_app.tenant_db.get_all.side_effect = financial_get_all
+    mock_frappe.db.get_value.return_value = "AUD"
+
+    result = get_financial_dashboard("test_user")
+    assert len(result["recent_activity"]) == 50
+
+
+def test_financial_dashboard_malformed_activity_limit_defaults_to_20():
+    mock_frappe.defaults = MagicMock()
+    mock_frappe.defaults.get_user_default.return_value = "Acme Pty Ltd"
+    sys.modules["flask"].request.args = _FakeArgs(
+        {
+            "preset": "custom",
+            "from_date": "2026-05-01",
+            "to_date": "2026-05-01",
+            "activity_limit": "not-a-number",
+        }
+    )
+
+    def financial_get_all(doctype, *args, **kwargs):
+        if kwargs.get("order_by"):
+            lim = kwargs.get("limit", 20)
+            if doctype == "Sales Invoice":
+                return [
+                    {
+                        "name": f"S-{i}",
+                        "customer": "C",
+                        "posting_date": date(2026, 5, 1),
+                        "grand_total": 1.0,
+                        "modified": datetime(2026, 5, 1, 3, i, 0),
+                        "status": "Draft",
+                    }
+                    for i in range(lim)
+                ]
+            if doctype == "Purchase Invoice":
+                return [
+                    {
+                        "name": f"P-{i}",
+                        "supplier": "S",
+                        "posting_date": date(2026, 5, 1),
+                        "grand_total": 2.0,
+                        "modified": datetime(2026, 5, 1, 4, i, 0),
+                        "status": "Draft",
+                    }
+                    for i in range(lim)
+                ]
+        return []
+
+    mock_app.tenant_db.get_all.side_effect = financial_get_all
+    mock_frappe.db.get_value.return_value = "AUD"
+
+    result = get_financial_dashboard("test_user")
+    assert len(result["recent_activity"]) == 20
 
 
 def test_purchase_invoice_bootstraps_missing_cost_center():

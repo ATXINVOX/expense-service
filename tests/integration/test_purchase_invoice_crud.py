@@ -12,6 +12,10 @@ TestPurchaseInvoiceSubmit   — draft → submitted via submit_purchase_invoice(
 TestPurchaseInvoiceDelete   — draft delete + submitted cancel-then-delete
 TestDashboardSummary        — aggregation across multiple invoices
 TestGetExpenses             — paginated list with embedded items
+
+Financial dashboard (get_financial_dashboard): BDD in
+``cypress/e2e/features/expense_api/financial_dashboard.feature``; TDD in
+``tests/test_purchase_invoice.py``.
 """
 
 import frappe

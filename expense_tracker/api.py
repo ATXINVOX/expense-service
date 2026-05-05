@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import calendar
 import logging
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 import frappe
 from frappe_microservice import get_app
 
@@ -87,6 +88,105 @@ def _invoice_filters(company: str, from_date: date, to_date: date):
         ["posting_date", ">=", from_date],
         ["posting_date", "<=", to_date],
     ]
+
+
+def _sales_invoice_filters(company: str, from_date: date, to_date: date):
+    """Same visibility rules as Purchase Invoice: company-scoped, exclude cancelled."""
+    return [
+        ["company", "=", company],
+        ["docstatus", "<", 2],
+        ["posting_date", ">=", from_date],
+        ["posting_date", "<=", to_date],
+    ]
+
+
+def _add_months(d: date, months: int) -> date:
+    """Shift date by calendar months (day clipped to last day of target month)."""
+    month_idx = d.month - 1 + months
+    year = d.year + month_idx // 12
+    month = month_idx % 12 + 1
+    last_day = calendar.monthrange(year, month)[1]
+    day = min(d.day, last_day)
+    return date(year, month, day)
+
+
+def _resolve_financial_period(preset: str, from_raw, to_raw):
+    """Resolve (from_date, to_date, preset_label) from preset or explicit dates."""
+    today = date.today()
+    p = (preset or "last_7_days").strip().lower()
+
+    if p in ("custom",):
+        fd = _safe_date(from_raw, lambda: None)
+        td = _safe_date(to_raw, lambda: None)
+        if not fd or not td:
+            frappe.throw("custom preset requires from_date and to_date (YYYY-MM-DD)")
+        if fd > td:
+            fd, td = td, fd
+        max_span = timedelta(days=732)
+        if td - fd > max_span:
+            frappe.throw("Custom date range cannot exceed 732 days")
+        return fd, td, "custom"
+
+    if p in ("last_7_days", "7d", "week"):
+        to_d = today
+        from_d = today - timedelta(days=6)
+        return from_d, to_d, "last_7_days"
+
+    if p in ("last_6_months", "6m", "six_months"):
+        to_d = today
+        from_d = _add_months(today, -6)
+        return from_d, to_d, "last_6_months"
+
+    frappe.throw(
+        "preset must be one of: last_7_days, last_6_months, custom "
+        f"(got {preset!r})"
+    )
+
+
+def _aggregate_by_posting_date(rows, amount_field: str):
+    """Sum numeric amounts keyed by posting_date (ISO date string)."""
+    buckets: dict[str, float] = {}
+    for row in rows or []:
+        pd = row.get("posting_date")
+        if isinstance(pd, datetime):
+            pd = pd.date()
+        elif hasattr(pd, "year"):
+            pass
+        elif isinstance(pd, str):
+            try:
+                pd = datetime.fromisoformat(pd.replace("Z", "+00:00")).date()
+            except Exception:
+                continue
+        else:
+            continue
+        key = pd.isoformat()
+        buckets[key] = buckets.get(key, 0.0) + _as_number(row.get(amount_field))
+    return buckets
+
+
+def _daily_series(
+    from_date: date,
+    to_date: date,
+    income_by_day: dict[str, float],
+    expense_by_day: dict[str, float],
+):
+    """One row per calendar day in range (inclusive), sorted ascending."""
+    out = []
+    d = from_date
+    while d <= to_date:
+        key = d.isoformat()
+        inc = income_by_day.get(key, 0.0)
+        exp = expense_by_day.get(key, 0.0)
+        out.append(
+            {
+                "date": key,
+                "income": round(inc, 2),
+                "expense": round(exp, 2),
+                "net": round(inc - exp, 2),
+            }
+        )
+        d += timedelta(days=1)
+    return out
 
 
 def _as_number(value):
@@ -616,4 +716,168 @@ def get_dashboard_summary(user, from_date=None, to_date=None):
                 breakdown.items(), key=lambda item: item[1], reverse=True
             )
         ],
+    }
+
+
+@get_app().secure_route(
+    "/api/method/expense_tracker.api.get_financial_dashboard",
+    methods=["GET"],
+)
+def get_financial_dashboard(user):
+    """Date-wise income (Sales Invoice) vs expense (Purchase Invoice), presets, and recent activity.
+
+    Uses the same tenant DB access patterns as the Resource API (``get_all`` on SI / PI).
+
+    Query parameters:
+
+    - ``preset``: ``last_7_days`` (default), ``last_6_months``, or ``custom``
+    - ``from_date`` / ``to_date``: required when ``preset=custom`` (YYYY-MM-DD)
+    - ``activity_limit``: max rows for ``recent_activity`` (default 20, max 50)
+    """
+    from flask import request
+    import urllib.parse
+
+    db = _app_db()
+    company = _resolve_company()
+    if not company:
+        frappe.throw("Company is required")
+
+    preset_q = request.args.get("preset") or request.args.get("period")
+    from_raw = request.args.get("from_date")
+    to_raw = request.args.get("to_date")
+    from_date, to_date, preset_used = _resolve_financial_period(
+        preset_q or "last_7_days", from_raw, to_raw
+    )
+
+    try:
+        act_limit = int(request.args.get("activity_limit") or 20)
+    except (TypeError, ValueError):
+        act_limit = 20
+    act_limit = max(1, min(act_limit, 50))
+
+    si_filters = _sales_invoice_filters(company, from_date, to_date)
+    pi_filters = _invoice_filters(company, from_date, to_date)
+
+    si_rows = db.get_all(
+        "Sales Invoice",
+        filters=si_filters,
+        fields=["name", "posting_date", "grand_total"],
+    )
+    pi_rows = db.get_all(
+        "Purchase Invoice",
+        filters=pi_filters,
+        fields=["name", "posting_date", "grand_total"],
+    )
+
+    income_by_day = _aggregate_by_posting_date(si_rows, "grand_total")
+    expense_by_day = _aggregate_by_posting_date(pi_rows, "grand_total")
+
+    daily = _daily_series(from_date, to_date, income_by_day, expense_by_day)
+    total_income = sum(_as_number(r.get("grand_total")) for r in si_rows or [])
+    total_expense = sum(_as_number(r.get("grand_total")) for r in pi_rows or [])
+
+    currency = db.get_value("Company", company, "default_currency") or "AUD"
+
+    # Recent activity: latest modified SI + PI for this company (Resource API–compatible fields).
+    si_recent = db.get_all(
+        "Sales Invoice",
+        filters=[["company", "=", company], ["docstatus", "<", 2]],
+        fields=[
+            "name",
+            "customer",
+            "posting_date",
+            "grand_total",
+            "modified",
+            "status",
+        ],
+        order_by="modified desc",
+        limit=act_limit,
+    )
+    pi_recent = db.get_all(
+        "Purchase Invoice",
+        filters=[["company", "=", company], ["docstatus", "<", 2]],
+        fields=[
+            "name",
+            "supplier",
+            "posting_date",
+            "grand_total",
+            "modified",
+            "status",
+        ],
+        order_by="modified desc",
+        limit=act_limit,
+    )
+
+    merged = []
+    for row in si_recent or []:
+        name = row.get("name")
+        merged.append(
+            {
+                "doctype": "Sales Invoice",
+                "name": name,
+                "party": row.get("customer"),
+                "posting_date": row.get("posting_date"),
+                "amount": _as_number(row.get("grand_total")),
+                "modified": row.get("modified"),
+                "status": row.get("status"),
+                "resource_path": "/api/resource/"
+                + urllib.parse.quote("Sales Invoice")
+                + "/"
+                + urllib.parse.quote(name or "", safe=""),
+            }
+        )
+    for row in pi_recent or []:
+        name = row.get("name")
+        merged.append(
+            {
+                "doctype": "Purchase Invoice",
+                "name": name,
+                "party": row.get("supplier"),
+                "posting_date": row.get("posting_date"),
+                "amount": _as_number(row.get("grand_total")),
+                "modified": row.get("modified"),
+                "status": row.get("status"),
+                "resource_path": "/api/resource/"
+                + urllib.parse.quote("Purchase Invoice")
+                + "/"
+                + urllib.parse.quote(name or "", safe=""),
+            }
+        )
+
+    def _modified_sort_key(row):
+        m = row.get("modified")
+        if isinstance(m, datetime):
+            return m
+        if isinstance(m, date) and not isinstance(m, datetime):
+            return datetime.combine(m, datetime.min.time())
+        if isinstance(m, str):
+            try:
+                return datetime.fromisoformat(m.replace("Z", "+00:00"))
+            except Exception:
+                pass
+        return datetime.min
+
+    merged.sort(key=_modified_sort_key, reverse=True)
+    recent_activity = merged[:act_limit]
+
+    return {
+        "company": company,
+        "currency": currency,
+        "preset": preset_used,
+        "period_label": _period_label(from_date, to_date),
+        "from_date": from_date.isoformat(),
+        "to_date": to_date.isoformat(),
+        "daily": daily,
+        "totals": {
+            "income": round(total_income, 2),
+            "expense": round(total_expense, 2),
+            "net": round(total_income - total_expense, 2),
+        },
+        "recent_activity": recent_activity,
+        "resource_api": {
+            "sales_invoice_list": "/api/resource/"
+            + urllib.parse.quote("Sales Invoice"),
+            "purchase_invoice_list": "/api/resource/"
+            + urllib.parse.quote("Purchase Invoice"),
+        },
     }
