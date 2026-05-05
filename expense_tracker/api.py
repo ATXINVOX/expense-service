@@ -932,7 +932,7 @@ def get_dashboard_summary(user, from_date=None, to_date=None):
                 ["parent", "in", invoice_names],
             ],
             # Let DB perform category aggregation; Python keeps only normalization.
-            fields=["item_group", "sum(amount) as total"],
+            fields=["item_group", {"SUM": "amount", "as": "total"}],
             group_by="item_group",
         )
         for row in invoice_items or []:
