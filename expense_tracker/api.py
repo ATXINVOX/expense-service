@@ -93,6 +93,35 @@ _CATEGORY_COLOR_PALETTE = (
     "#F59E0B",
 )
 
+# Donut chart: rolled-up slice when more than dashboard category limit.
+_OTHERS_SLICE_COLOR = "#94A3B8"
+_BREAKDOWN_TOP_N = 4
+
+
+def _breakdown_top_categories(
+    enriched_breakdown: list, total_spend: float, top_n: int = _BREAKDOWN_TOP_N
+) -> list:
+    """Top ``top_n`` categories by amount; remainder combined as ``Others``."""
+    if not enriched_breakdown:
+        return []
+    n = max(1, min(int(top_n), 50))
+    if len(enriched_breakdown) <= n:
+        return [{**row} for row in enriched_breakdown]
+    head = [{**row} for row in enriched_breakdown[:n]]
+    rest_total = sum(_as_number(r.get("total")) for r in enriched_breakdown[n:])
+    rest_pct = (
+        round((rest_total / total_spend * 100.0), 2) if total_spend > 0 else 0.0
+    )
+    head.append(
+        {
+            "item_group": "Others",
+            "total": round(rest_total, 2),
+            "pct": rest_pct,
+            "color": _OTHERS_SLICE_COLOR,
+        }
+    )
+    return head
+
 
 def _parse_posting_date_value(pd):
     """Normalize Purchase Invoice ``posting_date`` to a ``date`` or ``None``.
@@ -1023,6 +1052,9 @@ def get_dashboard_summary(user, from_date=None, to_date=None):
                 "cashflow": cashflow,
                 "cashflow_stats": _cashflow_stats_from_amounts(cf_amounts),
                 "breakdown": enriched_breakdown,
+                "breakdown_top4": _breakdown_top_categories(
+                    enriched_breakdown, total_spend, _BREAKDOWN_TOP_N
+                ),
             }
         )
 

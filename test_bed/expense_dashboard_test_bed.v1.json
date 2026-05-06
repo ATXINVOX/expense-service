@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "Expense dashboard API — contract & HTTP scenarios",
-    "version": "1.1",
+    "version": "1.2",
     "endpoint": "GET /api/method/expense_tracker.api.get_dashboard_summary",
     "auth": "Frappe session via X-Frappe-SID (and Cookie sid if your gateway expects it). Company from user defaults — no company query param.",
     "response_wrapping": "Expense microservice returns the dashboard object at the JSON root. Some gateways may wrap as { \"message\": { ... } }; clients should accept both.",
@@ -9,7 +9,7 @@
       "period": {
         "optional": true,
         "values": ["week", "month", "year"],
-        "notes": "Case-insensitive after trim. When set, adds preset, from_date, to_date, compare_period_label, trend_pct, previous_period_total, top_category, cashflow, cashflow_stats, and enriches breakdown with pct and color. Explicit from_date/to_date on the URL are ignored for preset requests."
+        "notes": "Case-insensitive after trim. When set, adds preset, from_date, to_date, compare_period_label, trend_pct, previous_period_total, top_category, cashflow, cashflow_stats, breakdown_top4 (top 4 item groups + Others), and enriches breakdown with pct and color. Explicit from_date/to_date on the URL are ignored for preset requests."
       },
       "from_date_to_date": {
         "optional": true,
@@ -29,8 +29,8 @@
       "year": ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
     },
     "edge_cases_manual": [
-      "No Purchase Invoices in range: total_spend 0, breakdown [], preset cashflow buckets all 0, trend_pct 0 when previous also 0.",
-      "Single category only: one breakdown row with pct 100.",
+      "No Purchase Invoices in range: total_spend 0, breakdown [], breakdown_top4 [], preset cashflow buckets all 0, trend_pct 0 when previous also 0.",
+      "Single category only: one breakdown row with pct 100; breakdown_top4 mirrors that row (no Others slice).",
       "Very large amounts: numeric floats (client formatting K/M is UI-only)."
     ]
   },
@@ -74,7 +74,8 @@
           "compare_period_label",
           "from_date",
           "to_date",
-          "breakdown"
+          "breakdown",
+          "breakdown_top4"
         ]
       }
     },
@@ -92,7 +93,7 @@
       },
       "expect": {
         "http_status": 200,
-        "payload_keys_subset": ["preset", "cashflow", "cashflow_stats", "top_category"]
+        "payload_keys_subset": ["preset", "cashflow", "cashflow_stats", "top_category", "breakdown_top4"]
       }
     },
     {
@@ -109,7 +110,7 @@
       },
       "expect": {
         "http_status": 200,
-        "payload_keys_subset": ["preset", "cashflow", "cashflow_stats"]
+        "payload_keys_subset": ["preset", "cashflow", "cashflow_stats", "breakdown_top4"]
       }
     },
     {
@@ -126,7 +127,8 @@
       },
       "expect": {
         "http_status": 200,
-        "payload_equals": { "preset": "week" }
+        "payload_equals": { "preset": "week" },
+        "payload_keys_subset": ["breakdown_top4"]
       }
     },
     {

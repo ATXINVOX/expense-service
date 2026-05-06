@@ -91,6 +91,14 @@ def _configure_frappe_throw():
 
 _configure_frappe_throw()
 
+
+class _EmptyRequestArgs:
+    """Default GET args so ``period`` is unset unless a test assigns ``request.args``."""
+
+    def get(self, key, default=None):
+        return default
+
+
 # frappe_client_submit imports flask.request at runtime; provide a stub so tests run without Flask installed.
 if "flask" not in sys.modules:
     _flask_stub = ModuleType("flask")
@@ -129,6 +137,7 @@ def reset_mocks():
     mock_app.tenant_db.get_all.side_effect = lambda *args, **kwargs: mock_frappe.get_all(*args, **kwargs)
     if "flask" in sys.modules and hasattr(sys.modules["flask"], "request"):
         sys.modules["flask"].request.reset_mock()
+        sys.modules["flask"].request.args = _EmptyRequestArgs()
     stub_frappe_client_submit.reset_mock()
     stub_frappe_client_submit.return_value = {
         "name": "stub-name",
@@ -388,7 +397,7 @@ def test_dashboard_summary_returns_aggregates():
             {"item_group": "Telephony", "amount": 1000.0},
         ],
     ]
-    mock_app.db.get_value.return_value = "AUD"
+    mock_frappe.db.get_value.return_value = "AUD"
 
     result = get_dashboard_summary("test_user")
 
@@ -403,7 +412,7 @@ def test_dashboard_summary_returns_aggregates():
 def test_dashboard_summary_uses_user_default_company():
     mock_frappe.defaults = MagicMock()
     mock_frappe.defaults.get_user_default.return_value = "Acme Pty Ltd"
-    mock_app.db.get_value.return_value = "AUD"
+    mock_frappe.db.get_value.return_value = "AUD"
     mock_app.db.get_all.side_effect = [
         [{"name": "PI-1", "grand_total": 10.0, "total_taxes_and_charges": 1.0}],
         [],
@@ -455,7 +464,7 @@ def test_dashboard_summary_falls_back_to_session_user_default():
 def test_dashboard_summary_fallbacks_to_invoice_level_item_group_when_child_query_empty():
     mock_frappe.defaults = MagicMock()
     mock_frappe.defaults.get_user_default.return_value = "Acme Pty Ltd"
-    mock_app.db.get_value.return_value = "AUD"
+    mock_frappe.db.get_value.return_value = "AUD"
     mock_app.db.get_all.side_effect = [
         [
             {
@@ -506,7 +515,7 @@ def test_dashboard_summary_preset_month_cashflow_and_trend():
     sys.modules["flask"].request.args = _FakeArgs({"period": "month"})
     mock_frappe.defaults = MagicMock()
     mock_frappe.defaults.get_user_default.return_value = "Acme Pty Ltd"
-    mock_app.db.get_value.return_value = "AUD"
+    mock_frappe.db.get_value.return_value = "AUD"
 
     with patch("expense_tracker.api.date", _date_class_with_fixed_today(fixed_today)):
         mock_app.db.get_all.side_effect = [
@@ -532,6 +541,9 @@ def test_dashboard_summary_preset_month_cashflow_and_trend():
     assert result["breakdown"][0]["pct"] == 100.0
     assert result["breakdown"][0]["color"].startswith("#")
     assert result["top_category"]["item_group"] == "Fuel"
+    assert "breakdown_top4" in result
+    assert len(result["breakdown_top4"]) == 1
+    assert result["breakdown_top4"][0]["item_group"] == "Fuel"
 
 
 def test_dashboard_summary_invalid_period_raises():
@@ -547,7 +559,7 @@ def test_dashboard_summary_preset_week_uppercase_period():
     sys.modules["flask"].request.args = _FakeArgs({"period": "WEEK"})
     mock_frappe.defaults = MagicMock()
     mock_frappe.defaults.get_user_default.return_value = "Acme Pty Ltd"
-    mock_app.db.get_value.return_value = "AUD"
+    mock_frappe.db.get_value.return_value = "AUD"
 
     with patch("expense_tracker.api.date", _date_class_with_fixed_today(fixed_today)):
         mock_app.db.get_all.side_effect = [
@@ -566,6 +578,41 @@ def test_dashboard_summary_preset_week_uppercase_period():
 
     assert result["preset"] == "week"
     assert len(result["cashflow"]) == 7
+    assert "breakdown_top4" in result
+    assert len(result["breakdown_top4"]) == 1
+
+
+def test_dashboard_summary_preset_breakdown_top4_merges_remainder_as_others():
+    """Donut UX: preset mode returns ``breakdown_top4`` (4 categories + Others)."""
+    fixed_today = date(2026, 5, 7)
+    sys.modules["flask"].request.args = _FakeArgs({"period": "month"})
+    mock_frappe.defaults = MagicMock()
+    mock_frappe.defaults.get_user_default.return_value = "Acme Pty Ltd"
+    mock_frappe.db.get_value.return_value = "AUD"
+
+    inv_rows = [
+        {
+            "name": f"PI-{i}",
+            "grand_total": 10.0,
+            "total_taxes_and_charges": 0.0,
+            "posting_date": fixed_today.replace(day=5),
+        }
+        for i in range(6)
+    ]
+    agg_rows = [{"item_group": f"Cat{i}", "total": 10.0} for i in range(6)]
+    prev = [{"grand_total": 50.0}]
+
+    with patch("expense_tracker.api.date", _date_class_with_fixed_today(fixed_today)):
+        mock_app.db.get_all.side_effect = [inv_rows, agg_rows, prev]
+        result = get_dashboard_summary("test_user")
+
+    assert len(result["breakdown"]) == 6
+    top4 = result["breakdown_top4"]
+    assert len(top4) == 5
+    assert top4[-1]["item_group"] == "Others"
+    assert top4[-1]["total"] == 20.0
+    pct_sum = sum(float(r["pct"]) for r in top4)
+    assert abs(pct_sum - 100.0) < 0.1
 
 
 def test_financial_dashboard_custom_daily_totals_and_activity():
