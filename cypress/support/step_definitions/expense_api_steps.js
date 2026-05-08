@@ -25,6 +25,18 @@ function sessionHeaders() {
   };
 }
 
+function responsePayload() {
+  const body = state.lastResponse?.body;
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return body;
+  }
+  // Some gateways wrap method responses as { message: { ... } }.
+  if (body.message && typeof body.message === "object" && !Array.isArray(body.message)) {
+    return body.message;
+  }
+  return body;
+}
+
 /** Calendar Y-m-d in the Cypress runner's local TZ (avoids hardcoded Gherkin dates missing Fiscal Year). */
 function integrationPostingDate() {
   const fromEnv = Cypress.env("EXPENSE_POSTING_DATE");
@@ -63,36 +75,42 @@ function postPurchaseInvoiceWithSession(body) {
 // ---------------------------------------------------------------------------
 
 Given("I login to the expense service as {string}", (user) => {
+  const envSid = Cypress.env("EXPENSE_TEST_SID");
+  if (envSid && String(envSid).trim()) {
+    state.sid = String(envSid).trim();
+    cy.log(`Using EXPENSE_TEST_SID from environment for ${user}`);
+    return;
+  }
   const pwd = Cypress.env("ADMIN_PASSWORD") || "admin";
   _loginAsFrappeUser(user, pwd);
 });
 
 Given("I login to the expense service as {string} with password {string}", (user, pwd) => {
+  const envSid = Cypress.env("EXPENSE_TEST_SID");
+  if (envSid && String(envSid).trim()) {
+    state.sid = String(envSid).trim();
+    cy.log(`Using EXPENSE_TEST_SID from environment for ${user}`);
+    return;
+  }
   _loginAsFrappeUser(user, pwd);
 });
 
 function _loginAsFrappeUser(user, pwd) {
-  cy.request({
-    method: "POST",
-    url: `${frappeBaseUrl()}/api/method/login`,
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
-      Accept: "application/json",
-    },
-    body: `usr=${encodeURIComponent(user)}&pwd=${encodeURIComponent(pwd)}`,
-    failOnStatusCode: false,
-  }).then((res) => {
-    // Frappe v13/v14 returns { sid } in the JSON body.
-    // Frappe v15/v16 sets the SID only as a Set-Cookie header.
-    // Try body first, then fall back to the cookie jar that Cypress maintains.
+  // Reuse an already acquired SID across scenarios in the same spec run.
+  // This avoids hammering login endpoints and hitting gateway rate limits.
+  if (state.sid && state.sid !== "Guest") {
+    cy.log(`Reusing existing SID for ${user}`);
+    return;
+  }
+
+  const captureSid = (res) => {
     const bodySid = res.body?.sid;
     if (bodySid && bodySid !== "Guest") {
       state.sid = bodySid;
       cy.log(`Logged in as ${user} — SID from body`);
-      return;
+      return true;
     }
 
-    // Extract from Set-Cookie header
     const setCookie = [].concat(res.headers?.["set-cookie"] ?? []).join(";");
     const cookieMatch = setCookie.match(/\bsid=([^;,\s]+)/i);
     const cookieSid = cookieMatch?.[1];
@@ -100,16 +118,56 @@ function _loginAsFrappeUser(user, pwd) {
     if (cookieSid && cookieSid !== "Guest") {
       state.sid = cookieSid;
       cy.log(`Logged in as ${user} — SID from Set-Cookie`);
-      return;
+      return true;
     }
+    return false;
+  };
 
-    // Last resort: ask Cypress for the persisted cookie
+  const assertCookieSid = () => {
     cy.getCookie("sid").then((cookie) => {
       const sid = cookie?.value;
       expect(sid, `Login as '${user}' must return a non-guest SID`).to.be.a("string").and.not.eq("Guest");
       state.sid = sid;
       cy.log(`Logged in as ${user} — SID from Cypress cookie jar`);
     });
+  };
+
+  cy.request({
+    method: "POST",
+    url: `${frappeBaseUrl()}/api/method/login`,
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    body: { usr: user, pwd },
+    failOnStatusCode: false,
+  }).then((res) => {
+    if (captureSid(res)) {
+      return;
+    }
+    if (res.status === 429) {
+      cy.log(`Login rate-limited for ${user}: ${JSON.stringify(res.body)}`);
+      assertCookieSid();
+      return;
+    }
+    // Fallback for environments that still expect form-urlencoded payloads.
+    if (res.status === 415) {
+      cy.request({
+        method: "POST",
+        url: `${frappeBaseUrl()}/api/method/login`,
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          Accept: "application/json",
+        },
+        body: `usr=${encodeURIComponent(user)}&pwd=${encodeURIComponent(pwd)}`,
+        failOnStatusCode: false,
+      }).then((jsonRes) => {
+        if (captureSid(jsonRes)) return;
+        assertCookieSid();
+      });
+      return;
+    }
+    assertCookieSid();
   });
 }
 
@@ -223,6 +281,18 @@ When("I GET the dashboard summary", () => {
   }).then((res) => { state.lastResponse = res; });
 });
 
+When("I GET the dashboard summary with query {string}", (queryString) => {
+  const q = (queryString || "").trim();
+  const base = `${serviceBaseUrl()}/api/method/expense_tracker.api.get_dashboard_summary`;
+  const url = q ? `${base}?${q}` : base;
+  cy.request({
+    method: "GET",
+    url,
+    headers: sessionHeaders(),
+    failOnStatusCode: false,
+  }).then((res) => { state.lastResponse = res; });
+});
+
 // ---------------------------------------------------------------------------
 // Financial dashboard (income vs expense, date-wise)
 // ---------------------------------------------------------------------------
@@ -260,54 +330,103 @@ Then("the expense API last response status should be {int}", (code) => {
   ).to.eq(expected);
 });
 
+Then("the expense API last response status should be one of {string}", (csv) => {
+  const allowed = String(csv)
+    .split(",")
+    .map((v) => parseInt(v.trim(), 10))
+    .filter((n) => Number.isInteger(n));
+  expect(allowed.length, "at least one valid status code must be provided").to.be.greaterThan(0);
+  expect(
+    state.lastResponse.status,
+    `expected one of [${allowed.join(", ")}], body=${JSON.stringify(state.lastResponse.body)}`,
+  ).to.be.oneOf(allowed);
+});
+
 Then("I store the created Purchase Invoice name from the response", () => {
-  const name = state.lastResponse.body?.name;
+  const payload = responsePayload();
+  const name = payload?.name;
   expect(name, "POST Purchase Invoice should return name").to.be.a("string").and.not.be.empty;
   state.storedInvoiceName = name;
   cy.log(`Stored invoice name: ${name}`);
 });
 
 Then("the stored invoice should have docstatus {int}", (ds) => {
-  expect(state.lastResponse.body.docstatus).to.eq(parseInt(ds, 10));
+  expect(responsePayload().docstatus).to.eq(parseInt(ds, 10));
 });
 
 Then("the stored invoice should have workflow status {string}", (st) => {
-  expect(state.lastResponse.body.status).to.eq(st);
+  expect(responsePayload().status).to.eq(st);
 });
 
 Then("the submit response should show success and status Submitted", () => {
-  expect(state.lastResponse.body.success).to.be.true;
-  expect(state.lastResponse.body.docstatus).to.eq(1);
+  const payload = responsePayload();
+  expect(payload.success).to.be.true;
+  expect(payload.docstatus).to.eq(1);
 });
 
 Then("the delete response should show success", () => {
-  expect(state.lastResponse.body.success).to.be.true;
+  expect(responsePayload().success).to.be.true;
 });
 
 Then("the response body should have field {string}", (field) => {
-  expect(state.lastResponse.body).to.have.property(field);
+  expect(responsePayload()).to.have.property(field);
 });
 
 Then("the response body field {string} should not be empty", (field) => {
-  const val = state.lastResponse.body[field];
+  const val = responsePayload()[field];
   expect(val, `${field} should not be empty`).to.exist.and.not.eq("");
 });
 
 Then("the response body field {string} should equal {string}", (field, expected) => {
-  expect(String(state.lastResponse.body[field])).to.eq(expected);
+  expect(String(responsePayload()[field])).to.eq(expected);
 });
 
 Then("the response body field {string} should be {int}", (field, expected) => {
-  expect(state.lastResponse.body[field]).to.eq(parseInt(expected, 10));
+  expect(responsePayload()[field]).to.eq(parseInt(expected, 10));
 });
 
 Then("the dashboard response should have a total_spend field", () => {
-  expect(state.lastResponse.body).to.have.property("total_spend");
-  expect(state.lastResponse.body.total_spend).to.be.a("number");
+  const payload = responsePayload();
+  expect(payload).to.have.property("total_spend");
+  expect(payload.total_spend).to.be.a("number");
+});
+
+Then("the dashboard response should include keys:", (dataTable) => {
+  const payload = responsePayload();
+  const rows = dataTable.raw().flat().map((v) => String(v).trim()).filter(Boolean);
+  for (const key of rows) {
+    expect(payload, `dashboard payload should include '${key}'`).to.have.property(key);
+  }
+});
+
+Then("the dashboard response should not include keys:", (dataTable) => {
+  const payload = responsePayload();
+  const rows = dataTable.raw().flat().map((v) => String(v).trim()).filter(Boolean);
+  for (const key of rows) {
+    expect(payload, `dashboard payload should not include '${key}'`).to.not.have.property(key);
+  }
+});
+
+Then("the dashboard preset should be {string}", (preset) => {
+  expect(responsePayload().preset).to.eq(preset);
+});
+
+Then("the dashboard cashflow should have bucket count {int}", (n) => {
+  const expected = parseInt(n, 10);
+  const payload = responsePayload();
+  expect(payload).to.have.property("cashflow");
+  expect(payload.cashflow).to.be.an("array").with.length(expected);
+});
+
+Then("each dashboard breakdown row should include pct and color", () => {
+  const rows = responsePayload().breakdown || [];
+  for (const row of rows) {
+    expect(row).to.include.keys("item_group", "total", "pct", "color");
+  }
 });
 
 Then("the financial dashboard response should expose analytics fields", () => {
-  const b = state.lastResponse.body;
+  const b = responsePayload();
   expect(b, `body=${JSON.stringify(b)}`).to.be.an("object");
   expect(b).to.have.property("daily");
   expect(b.daily).to.be.an("array");
@@ -324,7 +443,7 @@ Then("the financial dashboard response should expose analytics fields", () => {
 });
 
 Then("each daily row should include income expense and net", () => {
-  const rows = state.lastResponse.body.daily || [];
+  const rows = responsePayload().daily || [];
   expect(
     rows.length,
     "daily should include at least one day for the selected period",
@@ -335,16 +454,16 @@ Then("each daily row should include income expense and net", () => {
 });
 
 Then("the financial dashboard preset should be {string}", (preset) => {
-  expect(state.lastResponse.body.preset).to.eq(preset);
+  expect(responsePayload().preset).to.eq(preset);
 });
 
 Then("the financial dashboard daily length should be {int}", (n) => {
   const expected = parseInt(n, 10);
-  expect(state.lastResponse.body.daily.length).to.eq(expected);
+  expect(responsePayload().daily.length).to.eq(expected);
 });
 
 Then("the financial dashboard recent activity should have resource paths when non-empty", () => {
-  const items = state.lastResponse.body.recent_activity || [];
+  const items = responsePayload().recent_activity || [];
   for (const row of items) {
     expect(row).to.have.property("resource_path");
     expect(String(row.resource_path)).to.match(/^\/api\/resource\//);
