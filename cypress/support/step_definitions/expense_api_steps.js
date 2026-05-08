@@ -18,12 +18,34 @@ function serviceBaseUrl() {
   return Cypress.env("EXPENSE_SERVICE_URL") || "http://localhost:9004";
 }
 
+function defaultGatewayBaseUrl() {
+  const explicit =
+    Cypress.env("API_BASE_URL") || Cypress.env("EXPENSE_GATEWAY_URL") || Cypress.env("EXPENSE_FRAPPE_URL");
+  if (explicit && String(explicit).trim()) {
+    return String(explicit).trim();
+  }
+
+  // CI often runs Cypress inside a container where localhost:8000 is not reachable.
+  // Derive Kong host from Cypress baseUrl and force port 8000.
+  const baseUrl = Cypress.config("baseUrl");
+  if (baseUrl) {
+    try {
+      const parsed = new URL(baseUrl);
+      return `${parsed.protocol}//${parsed.hostname}:8000`;
+    } catch (_e) {
+      // fall through to local default
+    }
+  }
+
+  return "http://localhost:8000";
+}
+
 function frappeBaseUrl() {
-  return Cypress.env("EXPENSE_FRAPPE_URL") || "http://localhost:8000";
+  return defaultGatewayBaseUrl();
 }
 
 function gatewayBaseUrl() {
-  return Cypress.env("EXPENSE_GATEWAY_URL") || frappeBaseUrl();
+  return defaultGatewayBaseUrl();
 }
 
 function sessionHeaders() {
@@ -394,7 +416,7 @@ function bearerHeaders(token) {
 }
 
 function dashboardApiBaseUrl() {
-  return Cypress.env("API_BASE_URL") || "http://localhost:8000";
+  return defaultGatewayBaseUrl();
 }
 
 function authTokenUrl() {
