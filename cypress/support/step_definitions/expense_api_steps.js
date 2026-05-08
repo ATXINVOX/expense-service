@@ -504,6 +504,60 @@ function extractCsrfFromResponseBody(body) {
   return body?.csrf_token || body?.message?.csrf_token || null;
 }
 
+function trySessionLogin(apiBase, existingSidCookie, user, password) {
+  return cy
+    .request({
+      method: "POST",
+      url: `${apiBase}/api/method/login`,
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        Cookie: `sid=${existingSidCookie}`,
+      },
+      body: { email: user, password },
+      failOnStatusCode: false,
+    })
+    .then((resEmailPwd) => {
+      let sid = extractSidFromLoginResponse(resEmailPwd);
+      let csrfToken = extractCsrfFromResponseBody(resEmailPwd.body);
+      if (sid) {
+        return {
+          sid,
+          csrfToken,
+          emailPwdStatus: resEmailPwd.status,
+          usrPwdStatus: null,
+          emailPwdBody: resEmailPwd.body,
+          usrPwdBody: null,
+        };
+      }
+
+      return cy
+        .request({
+          method: "POST",
+          url: `${apiBase}/api/method/login`,
+          headers: {
+            Accept: "application/json",
+            "Content-Type": "application/json",
+            Cookie: `sid=${existingSidCookie}`,
+          },
+          body: { usr: user, pwd: password },
+          failOnStatusCode: false,
+        })
+        .then((resUsrPwd) => {
+          sid = extractSidFromLoginResponse(resUsrPwd);
+          csrfToken = csrfToken || extractCsrfFromResponseBody(resUsrPwd.body);
+          return {
+            sid: sid || null,
+            csrfToken: csrfToken || null,
+            emailPwdStatus: resEmailPwd.status,
+            usrPwdStatus: resUsrPwd.status,
+            emailPwdBody: resEmailPwd.body,
+            usrPwdBody: resUsrPwd.body,
+          };
+        });
+    });
+}
+
 function sidHeaders(sid) {
   const h = {
     Accept: "application/json",
@@ -719,55 +773,49 @@ Given("I am an authenticated user", () => {
   // Default requested by user: Kong login at localhost:8000 with email/password JSON.
   const email = loginUser;
   const password = loginPassword;
+  const fallbackUser = Cypress.env("FALLBACK_TEST_USER") || "Administrator";
+  const fallbackPassword = Cypress.env("FALLBACK_TEST_PASSWORD") || "admin";
   const existingSidCookie =
     Cypress.env("LOGIN_SID_COOKIE") || "a4c5f7a282266fbf56a37a31a63c364c07e5cedcc1b1e5e60f8a5768";
 
-  cy.request({
-    method: "POST",
-    url: `${apiBase}/api/method/login`,
-    headers: {
-      Accept: "application/json",
-      "Content-Type": "application/json",
-      Cookie: `sid=${existingSidCookie}`,
-    },
-    body: { email, password },
-    failOnStatusCode: false,
-  }).then((resEmailPwd) => {
-    let sid = extractSidFromLoginResponse(resEmailPwd);
-    const csrf = extractCsrfFromResponseBody(resEmailPwd.body);
-    if (sid) {
-      state.authToken = sid;
-      state.authMode = "sid";
-      state.sid = sid;
-      state.csrfToken = csrf;
-      return;
-    }
+  cy.then(() =>
+    trySessionLogin(apiBase, existingSidCookie, email, password).then((primaryLogin) => {
+      if (primaryLogin.sid) {
+        state.authToken = primaryLogin.sid;
+        state.authMode = "sid";
+        state.sid = primaryLogin.sid;
+        state.csrfToken = primaryLogin.csrfToken;
+        state.loggedInUser = email;
+        return;
+      }
 
-    cy.request({
-      method: "POST",
-      url: `${apiBase}/api/method/login`,
-      headers: {
-        Accept: "application/json",
-        "Content-Type": "application/json",
-        Cookie: `sid=${existingSidCookie}`,
-      },
-      body: { usr: email, pwd: password },
-      failOnStatusCode: false,
-    }).then((resUsrPwd) => {
-      sid = extractSidFromLoginResponse(resUsrPwd);
-      const csrf2 = extractCsrfFromResponseBody(resUsrPwd.body);
-      expect(
-        sid,
-        `Login failed. email/pwd status=${resEmailPwd.status}, usr/pwd status=${resUsrPwd.status}, body=${JSON.stringify(
-          resUsrPwd.body,
-        )}`,
-      ).to.be.a("string").and.not.be.empty;
-      state.authToken = sid;
-      state.authMode = "sid";
-      state.sid = sid;
-      state.csrfToken = csrf2;
-    });
-  });
+      if (String(email).trim().toLowerCase() === String(fallbackUser).trim().toLowerCase()) {
+        expect(
+          primaryLogin.sid,
+          `Login failed for ${email}. email/pwd status=${primaryLogin.emailPwdStatus}, usr/pwd status=${primaryLogin.usrPwdStatus}, body=${JSON.stringify(
+            primaryLogin.usrPwdBody || primaryLogin.emailPwdBody,
+          )}`,
+        ).to.be.a("string").and.not.be.empty;
+        return;
+      }
+
+      return trySessionLogin(apiBase, existingSidCookie, fallbackUser, fallbackPassword).then(
+        (fallbackLogin) => {
+          expect(
+            fallbackLogin.sid,
+            `Login failed for primary user ${email} and fallback user ${fallbackUser}. primary email/pwd=${primaryLogin.emailPwdStatus} usr/pwd=${primaryLogin.usrPwdStatus}; fallback email/pwd=${fallbackLogin.emailPwdStatus} usr/pwd=${fallbackLogin.usrPwdStatus}; fallback body=${JSON.stringify(
+              fallbackLogin.usrPwdBody || fallbackLogin.emailPwdBody,
+            )}`,
+          ).to.be.a("string").and.not.be.empty;
+          state.authToken = fallbackLogin.sid;
+          state.authMode = "sid";
+          state.sid = fallbackLogin.sid;
+          state.csrfToken = fallbackLogin.csrfToken;
+          state.loggedInUser = fallbackUser;
+        },
+      );
+    }),
+  );
 
   // Some benches expose csrf_token via get_logged_user only.
   cy.then(() => {
@@ -785,7 +833,7 @@ Given("I am an authenticated user", () => {
   });
 
   cy.then(() => {
-    if (String(loginUser).trim().toLowerCase() !== "administrator") return;
+    if (String(state.loggedInUser || "").trim().toLowerCase() !== "administrator") return;
     return ensureAdministratorTenantContext();
   });
 
