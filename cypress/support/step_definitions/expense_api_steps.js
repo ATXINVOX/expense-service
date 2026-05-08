@@ -21,11 +21,6 @@ function serviceBaseUrl() {
 function normalizeGatewayUrl(urlString) {
   try {
     const parsed = new URL(String(urlString).trim());
-    const host = (parsed.hostname || "").toLowerCase();
-    // invoice_tracker routes must go through Kong; central-site host points to wrong app.
-    if (host.includes("central-site")) {
-      return `${parsed.protocol}//kong:8000`;
-    }
     return `${parsed.protocol}//${parsed.host}`;
   } catch (_e) {
     return String(urlString).trim();
