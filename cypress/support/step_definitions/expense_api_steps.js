@@ -18,11 +18,25 @@ function serviceBaseUrl() {
   return Cypress.env("EXPENSE_SERVICE_URL") || "http://localhost:9004";
 }
 
+function normalizeGatewayUrl(urlString) {
+  try {
+    const parsed = new URL(String(urlString).trim());
+    const host = (parsed.hostname || "").toLowerCase();
+    // invoice_tracker routes must go through Kong; central-site host points to wrong app.
+    if (host.includes("central-site")) {
+      return `${parsed.protocol}//kong:8000`;
+    }
+    return `${parsed.protocol}//${parsed.host}`;
+  } catch (_e) {
+    return String(urlString).trim();
+  }
+}
+
 function defaultGatewayBaseUrl() {
   const explicit =
     Cypress.env("API_BASE_URL") || Cypress.env("EXPENSE_GATEWAY_URL") || Cypress.env("EXPENSE_FRAPPE_URL");
   if (explicit && String(explicit).trim()) {
-    return String(explicit).trim();
+    return normalizeGatewayUrl(explicit);
   }
 
   // CI often runs Cypress inside a container where localhost:8000 is not reachable.
@@ -31,7 +45,7 @@ function defaultGatewayBaseUrl() {
   if (baseUrl) {
     try {
       const parsed = new URL(baseUrl);
-      return `${parsed.protocol}//${parsed.hostname}:8000`;
+      return normalizeGatewayUrl(`${parsed.protocol}//${parsed.hostname}:8000`);
     } catch (_e) {
       // fall through to local default
     }
@@ -1521,6 +1535,28 @@ When("I request the dashboard data", () => {
     url: `${base}/api/method/invoice_tracker.api.get_invoice_dashboard?preset=${encodeURIComponent(
       preset,
     )}&recent_limit=50`,
+    headers,
+    failOnStatusCode: false,
+  }).then((res) => {
+    state.lastResponse = res;
+  });
+});
+
+When("I request the financial dashboard data", () => {
+  const base = dashboardApiBaseUrl();
+  const headers = {
+    Accept: "application/json",
+  };
+  if (state.authToken && state.authMode === "bearer") {
+    headers.Authorization = `Bearer ${state.authToken}`;
+  } else if (state.authToken && state.authMode === "sid") {
+    headers["X-Frappe-SID"] = state.authToken;
+    headers.Cookie = `sid=${state.authToken}`;
+  }
+
+  cy.request({
+    method: "GET",
+    url: `${base}/api/method/expense_tracker.api.get_financial_dashboard?preset=last_7_days`,
     headers,
     failOnStatusCode: false,
   }).then((res) => {
