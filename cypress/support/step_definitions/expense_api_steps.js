@@ -6,6 +6,8 @@ const state = {
   lastResponse: null,
   storedInvoiceName: null,
   sid: null,
+  authToken: null,
+  authMode: "none", // none | sid | bearer
 };
 
 function serviceBaseUrl() {
@@ -14,6 +16,10 @@ function serviceBaseUrl() {
 
 function frappeBaseUrl() {
   return Cypress.env("EXPENSE_FRAPPE_URL") || "http://localhost:8000";
+}
+
+function gatewayBaseUrl() {
+  return Cypress.env("EXPENSE_GATEWAY_URL") || frappeBaseUrl();
 }
 
 function sessionHeaders() {
@@ -246,6 +252,132 @@ When("I GET the financial dashboard with query {string}", (queryString) => {
     headers: sessionHeaders(),
     failOnStatusCode: false,
   }).then((res) => { state.lastResponse = res; });
+});
+
+function extractSidFromLoginResponse(res) {
+  const bodySid = res.body?.sid || res.body?.message?.sid;
+  if (bodySid && bodySid !== "Guest") return bodySid;
+  const setCookie = [].concat(res.headers?.["set-cookie"] ?? []);
+  for (const line of setCookie) {
+    const m = String(line).match(/\bsid=([^;,\s]+)/i);
+    if (m?.[1] && m[1] !== "Guest") return decodeURIComponent(m[1]);
+  }
+  return null;
+}
+
+Given("I am an authenticated user", () => {
+  const base = gatewayBaseUrl();
+  const email = Cypress.env("TEST_USER_EMAIL") || "thiruvarasu.u@datasirpi.com";
+  const password = Cypress.env("TEST_USER_PASSWORD") || "Str0ng!Pass#2026";
+  const bearerFromEnv = Cypress.env("DASHBOARD_BEARER_TOKEN");
+
+  // If caller provides a real OAuth token, use strict Bearer mode.
+  if (bearerFromEnv && String(bearerFromEnv).trim()) {
+    state.authToken = String(bearerFromEnv).trim();
+    state.authMode = "bearer";
+    state.sid = null;
+    return;
+  }
+
+  // Primary login payload requested by user: { email, password }
+  cy.request({
+    method: "POST",
+    url: `${base}/api/method/login`,
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
+    body: { email, password },
+    failOnStatusCode: false,
+  }).then((resEmailPwd) => {
+    let sid = extractSidFromLoginResponse(resEmailPwd);
+    if (sid) {
+      state.sid = sid;
+      state.authToken = sid;
+      state.authMode = "sid";
+      return;
+    }
+
+    // Fallback for benches that still expect usr/pwd.
+    cy.request({
+      method: "POST",
+      url: `${base}/api/method/login`,
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: { usr: email, pwd: password },
+      failOnStatusCode: false,
+    }).then((resUsrPwd) => {
+      sid = extractSidFromLoginResponse(resUsrPwd);
+      expect(
+        sid,
+        `Login must return session token. email/pwd status=${resEmailPwd.status}, usr/pwd status=${resUsrPwd.status}`,
+      ).to.be.a("string").and.not.eq("Guest");
+      state.sid = sid;
+      state.authToken = sid;
+      state.authMode = "sid";
+    });
+  });
+});
+
+Given("I do not have an authentication token", () => {
+  state.authToken = null;
+  state.sid = null;
+  state.authMode = "none";
+});
+
+Given("I have an invalid authentication token", () => {
+  state.authToken = "invalid-token";
+  state.sid = null;
+  state.authMode = "bearer";
+});
+
+When("I request the dashboard data", () => {
+  const base = gatewayBaseUrl();
+  const headers = {
+    Accept: "application/json",
+  };
+
+  if (state.authToken && state.authMode === "bearer") {
+    // Strict Bearer mode (real OAuth token or invalid-token scenario).
+    headers.Authorization = `Bearer ${state.authToken}`;
+  } else if (state.authToken && state.authMode === "sid") {
+    // Session-auth mode from /api/method/login.
+    headers["X-Frappe-SID"] = state.authToken;
+    headers.Cookie = `sid=${state.authToken}`;
+  }
+
+  cy.request({
+    method: "GET",
+    url: `${base}/api/method/expense_tracker.api.get_financial_dashboard`,
+    headers,
+    failOnStatusCode: false,
+  }).then((res) => {
+    state.lastResponse = res;
+  });
+});
+
+Then("the dashboard API should return success", () => {
+  expect(
+    state.lastResponse.status,
+    `expected HTTP 200, body=${JSON.stringify(state.lastResponse.body)}`,
+  ).to.eq(200);
+});
+
+Then("the dashboard response should contain summary metrics", () => {
+  const b = state.lastResponse.body;
+  expect(b, JSON.stringify(b)).to.be.an("object");
+  expect(b).to.have.property("totals");
+  expect(b.totals).to.include.keys("income", "expense", "net");
+  expect(b).to.have.property("daily");
+});
+
+Then("the dashboard API should return unauthorized", () => {
+  expect(
+    state.lastResponse.status,
+    `expected unauthorized, body=${JSON.stringify(state.lastResponse.body)}`,
+  ).to.be.oneOf([401, 403]);
 });
 
 // ---------------------------------------------------------------------------
