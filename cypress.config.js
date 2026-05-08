@@ -10,6 +10,12 @@ const {
 function deriveGatewayUrl(serviceUrl) {
   try {
     const parsed = new URL(serviceUrl);
+    const host = (parsed.hostname || "").toLowerCase();
+    // In CI/container networks, expense service often resolves to dev-central-site.
+    // Kong is a separate service and should be addressed by service name.
+    if (host.includes("central-site")) {
+      return `${parsed.protocol}//kong:8000`;
+    }
     return `${parsed.protocol}//${parsed.hostname}:8000`;
   } catch (_e) {
     return "http://localhost:8000";
