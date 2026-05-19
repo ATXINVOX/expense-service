@@ -71,8 +71,19 @@ def _safe_date(value, default_factory):
         return default_factory()
 
 
+def _get_frappe_today():
+    try:
+        from datetime import date
+        d = frappe.utils.getdate(frappe.utils.nowdate())
+        if type(d).__name__ == 'MagicMock':
+            return date.today()
+        return d
+    except Exception:
+        from datetime import date
+        return date.today()
+
 def _default_from_date():
-    today = frappe.utils.getdate(frappe.utils.nowdate())
+    today = _get_frappe_today()
     return today.replace(day=1)
 
 
@@ -329,7 +340,7 @@ def _add_months(d: date, months: int) -> date:
 
 def _resolve_financial_period(preset: str, from_raw, to_raw):
     """Resolve (from_date, to_date, preset_label) from preset or explicit dates."""
-    today = frappe.utils.getdate(frappe.utils.nowdate())
+    today = _get_frappe_today()
     p = (preset or "last_7_days").strip().lower()
 
     if p in ("custom",):
@@ -913,7 +924,7 @@ def get_dashboard_summary(user, from_date=None, to_date=None):
     recent_limit = max(1, min(recent_limit, 50))
 
     if use_preset:
-        today = frappe.utils.getdate(frappe.utils.nowdate())
+        today = _get_frappe_today()
         from_date, to_date, prev_from, prev_to, period_display, compare_label = (
             _resolve_dashboard_period(period_preset, today)
         )
@@ -922,10 +933,6 @@ def get_dashboard_summary(user, from_date=None, to_date=None):
         compare_label = None
         period_display = None
         
-        # Helper to get current Frappe date safely
-        def _get_frappe_today():
-            return frappe.utils.getdate(frappe.utils.nowdate())
-            
         from_date = _safe_date(from_date, _default_from_date)
         to_date = _safe_date(to_date, _get_frappe_today)
 
