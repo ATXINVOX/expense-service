@@ -756,6 +756,7 @@ def _project_purchase_invoice_api(doc):
         "docstatus": d.get("docstatus"),
         "grand_total": _to_api_float(d.get("grand_total")),
         "currency": d.get("currency"),
+        "receipt_image": d.get("receipt_image"),
     }
 
 
