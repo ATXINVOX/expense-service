@@ -10,7 +10,7 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: atxinvox-org-runner
     permissions:
       contents: read
       packages: read
@@ -39,7 +39,7 @@ jobs:
 
   integration-test:
     needs: test
-    runs-on: ubuntu-latest
+    runs-on: atxinvox-org-runner
     env:
       # Consistent volume mount path for all docker compose calls in this job.
       # The lib is extracted from the GHCR image into /tmp/ms-src in the
@@ -292,7 +292,7 @@ jobs:
 
   build:
     needs: [test, integration-test]
-    runs-on: ubuntu-latest
+    runs-on: atxinvox-org-runner
     permissions:
       contents: read
       packages: write
