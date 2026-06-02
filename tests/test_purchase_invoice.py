@@ -517,8 +517,10 @@ def test_dashboard_summary_preset_month_cashflow_and_trend():
     mock_frappe.defaults.get_user_default.return_value = "Acme Pty Ltd"
     mock_frappe.db.get_value.return_value = "AUD"
 
-    with patch("expense_tracker.api.date", _date_class_with_fixed_today(fixed_today)):
-        mock_app.db.get_all.side_effect = [
+    with patch("expense_tracker.api.date", _date_class_with_fixed_today(fixed_today)), patch(
+        "expense_tracker.api._get_frappe_today", return_value=fixed_today
+    ):
+        mock_app.tenant_db.get_all.side_effect = [
             [
                 {
                     "name": "PI-1",
@@ -561,7 +563,9 @@ def test_dashboard_summary_preset_week_uppercase_period():
     mock_frappe.defaults.get_user_default.return_value = "Acme Pty Ltd"
     mock_frappe.db.get_value.return_value = "AUD"
 
-    with patch("expense_tracker.api.date", _date_class_with_fixed_today(fixed_today)):
+    with patch("expense_tracker.api.date", _date_class_with_fixed_today(fixed_today)), patch(
+        "expense_tracker.api._get_frappe_today", return_value=fixed_today
+    ):
         mock_app.db.get_all.side_effect = [
             [
                 {
@@ -602,7 +606,9 @@ def test_dashboard_summary_preset_breakdown_top4_merges_remainder_as_others():
     agg_rows = [{"item_group": f"Cat{i}", "total": 10.0} for i in range(6)]
     prev = [{"grand_total": 50.0}]
 
-    with patch("expense_tracker.api.date", _date_class_with_fixed_today(fixed_today)):
+    with patch("expense_tracker.api.date", _date_class_with_fixed_today(fixed_today)), patch(
+        "expense_tracker.api._get_frappe_today", return_value=fixed_today
+    ):
         mock_app.db.get_all.side_effect = [inv_rows, agg_rows, prev]
         result = get_dashboard_summary("test_user")
 
@@ -652,6 +658,17 @@ def test_financial_dashboard_custom_daily_totals_and_activity():
                         "status": "Draft",
                     },
                 ]
+            if doctype == "Quotation":
+                return [
+                    {
+                        "name": "SAL-QTN-2026-00001",
+                        "customer_name": "Prospect Co",
+                        "transaction_date": date(2026, 5, 3),
+                        "grand_total": 500.0,
+                        "modified": datetime(2026, 5, 4, 12, 0, 0),
+                        "status": "Open",
+                    },
+                ]
             return []
         if doctype == "Sales Invoice":
             return [
@@ -681,8 +698,11 @@ def test_financial_dashboard_custom_daily_totals_and_activity():
     assert result["daily"][1]["expense"] == 40.0
     assert result["daily"][2]["income"] == 50.0
     assert len(result["recent_activity"]) <= 5
-    assert result["recent_activity"][0]["doctype"] == "Purchase Invoice"
-    assert "/api/resource/Purchase%20Invoice/" in result["recent_activity"][0]["resource_path"]
+    assert result["recent_activity"][0]["doctype"] == "Quotation"
+    assert result["resource_api"]["quotation_list"] == "/api/resource/Quotation"
+    doctypes = {r["doctype"] for r in result["recent_activity"]}
+    assert "Quotation" in doctypes
+    assert "Purchase Invoice" in doctypes
 
 
 def test_financial_dashboard_custom_requires_dates():
