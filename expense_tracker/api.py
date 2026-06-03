@@ -13,6 +13,7 @@ from controllers.purchase_invoice import (
     _expense_title,
     clear_account_cache_for_company,
     clear_company_currency_cache,
+    ensure_purchase_invoice_item_defaults,
     ensure_purchase_invoice_submit_prereqs,
 )
 
@@ -621,9 +622,6 @@ def frappe_client_submit(user):
             # submit-time validation errors on partially provisioned tenants.
             sup = (row.get("supplier") or "").strip() or None
             ensure_purchase_invoice_submit_prereqs(co, sup)
-            # Flush + drop stale Account cache (get_cached_value used for party_account_currency).
-            frappe.db.commit()
-            clear_account_cache_for_company(co)
 
             expense_title = _expense_title(
                 row.get("expense_item_name"),
@@ -652,6 +650,11 @@ def frappe_client_submit(user):
 
             doc = frappe.get_doc("Purchase Invoice", name)
             doc.flags.ignore_permissions = True
+            ensure_purchase_invoice_item_defaults(doc)
+            ensure_purchase_invoice_submit_prereqs(co, sup, doc.get("posting_date"))
+            # Flush + drop stale Account cache (get_cached_value used for party_account_currency).
+            frappe.db.commit()
+            clear_account_cache_for_company(co)
 
             # Defence-in-depth: ensure the PI itself has currency & conversion_rate
             # and clear the company-currency cache one final time so ERPNext's
@@ -787,7 +790,10 @@ def create_purchase_invoice(user):
         return {"error": "Request body required"}, 400
 
     try:
-        doc = _app_db().insert_doc("Purchase Invoice", data)
+        # Session auth is enforced by secure_route; Frappe desk roles are not required.
+        doc = _app_db().insert_doc(
+            "Purchase Invoice", data, ignore_permissions=True
+        )
         out = _project_purchase_invoice_api(doc)
         out["success"] = True
         out["doctype"] = "Purchase Invoice"

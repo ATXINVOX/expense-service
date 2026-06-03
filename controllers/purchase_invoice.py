@@ -28,6 +28,13 @@ def _app_db():
     return get_app().tenant_db
 
 
+def _set_company_field(company: str, fieldname: str, value) -> None:
+    """Update Company defaults without tenant-scoped get_doc (setup during PI enrich)."""
+    if not company:
+        return
+    frappe.db.set_value("Company", company, fieldname, value, update_modified=False)
+
+
 DEFAULT_GST_TEMPLATE = "AU GST 10%"
 GST_MARKER = "gst"
 # Australian expense product: all fallbacks and back-filled master data use AUD only.
@@ -107,6 +114,23 @@ def _ensure_cost_center_by_name(expected_name: str, values: Dict[str, Any], **in
         return expected_name
 
 
+def _link_fiscal_year_to_company(fy_name: str, company: str) -> None:
+    """Ensure ``company`` is linked to ``fy_name`` for ERPNext company-scoped FY lookup."""
+    if not fy_name or not company:
+        return
+    link_name = f"{fy_name}-{company}"
+    if frappe.db.exists("Fiscal Year Company", link_name):
+        return
+    frappe.db.sql(
+        """
+        INSERT IGNORE INTO `tabFiscal Year Company`
+        (name, parent, parenttype, parentfield, company, creation, modified, modified_by, owner, docstatus, idx)
+        VALUES (%s, %s, 'Fiscal Year', 'companies', %s, NOW(), NOW(), 'Administrator', 'Administrator', 0, 1)
+        """,
+        (link_name, fy_name, company),
+    )
+
+
 def _ensure_fiscal_year(posting_date: str | None, company: str):
     """Create a Fiscal Year covering the posting_date if none exists."""
     from datetime import date as _date, datetime as _datetime
@@ -146,6 +170,7 @@ def _ensure_fiscal_year(posting_date: str | None, company: str):
 
     existing = frappe.db.get_value("Fiscal Year", fy_name, "name")
     if existing:
+        _link_fiscal_year_to_company(existing, company)
         return existing
 
     # Any existing FY that covers the posting date is acceptable (e.g. a
@@ -159,6 +184,7 @@ def _ensure_fiscal_year(posting_date: str | None, company: str):
         "name",
     )
     if existing_by_date:
+        _link_fiscal_year_to_company(existing_by_date, company)
         return existing_by_date
 
     try:
@@ -168,32 +194,44 @@ def _ensure_fiscal_year(posting_date: str | None, company: str):
             "year_start_date": str(fy_start),
             "year_end_date": str(fy_end),
         }, ignore_mandatory=True)
-        frappe.db.sql("""
-            INSERT IGNORE INTO `tabFiscal Year Company`
-            (name, parent, parenttype, parentfield, company, creation, modified, modified_by, owner, docstatus, idx)
-            VALUES (%s, %s, 'Fiscal Year', 'companies', %s, NOW(), NOW(), 'Administrator', 'Administrator', 0, 1)
-        """, (f"{fy_name}-{company}", fy_name, company))
+        _link_fiscal_year_to_company(fy_doc.name, company)
         frappe.db.commit()
         return fy_doc.name
     except frappe.DuplicateEntryError:
         frappe.db.rollback()
+        _link_fiscal_year_to_company(fy_name, company)
         return fy_name
 
 
 def _company_abbr(company: str) -> str:
-    abbr = _app_db().get_value("Company", company, "abbr")
-    if abbr:
-        return str(abbr)
+    """Company abbreviation for account/CC naming (``Expenses - {abbr}``).
 
-    payable = _app_db().get_value(
+    Uses global ``frappe.db`` first — tenant-scoped lookups can miss Company rows
+    and previously fell back to the hardcoded ``COMP`` suffix (breaking CoA paths).
+    """
+    if not company:
+        return ""
+    abbr = frappe.db.get_value("Company", company, "abbr")
+    if abbr:
+        return str(abbr).strip()
+    try:
+        abbr = _app_db().get_value("Company", company, "abbr")
+        if abbr:
+            return str(abbr).strip()
+    except Exception:
+        pass
+    payable = frappe.db.get_value(
         "Account",
-        {"company": company, "account_type": "Payable"},
+        {"company": company, "account_type": "Payable", "is_group": 0},
         "name",
     )
     if payable and " - " in str(payable):
-        return str(payable).rsplit(" - ", 1)[-1]
-
-    return "COMP"
+        return str(payable).rsplit(" - ", 1)[-1].strip()
+    # Last resort: initials from company name (never a fixed fake abbr).
+    parts = [p for p in str(company).replace("_", " ").split() if p]
+    if parts:
+        return "".join(p[0] for p in parts[:6]).upper()[:10]
+    return "CO"
 
 
 def _resolve_company_from_user():
@@ -261,9 +299,59 @@ def _is_gst_row(tax_row: Dict[str, Any]) -> bool:
     return GST_MARKER in desc or GST_MARKER in charge
 
 
+def _find_expense_group_parent(company: str, abbr: str) -> str | None:
+    """Existing expense group account for ``company`` (standard CoA or prior bootstrap)."""
+    for name in (f"Expenses - {abbr}", "Expenses"):
+        if not frappe.db.exists("Account", name):
+            continue
+        acct_company = frappe.db.get_value("Account", name, "company")
+        is_group = frappe.db.get_value("Account", name, "is_group")
+        if is_group and (not acct_company or acct_company == company):
+            return name
+    return frappe.db.get_value(
+        "Account",
+        {"company": company, "root_type": "Expense", "is_group": 1},
+        "name",
+    )
+
+
+def _ensure_account_row(
+    name: str,
+    *,
+    account_name: str,
+    company: str,
+    root_type: str,
+    report_type: str,
+    is_group: int = 0,
+    account_type: str | None = None,
+    parent_account: str | None = None,
+) -> str:
+    """Create Account if missing; global exists check avoids tenant-scoped duplicate INSERT."""
+    if frappe.db.exists("Account", name):
+        return name
+    cc = _company_default_currency(company)
+    payload: Dict[str, Any] = {
+        "account_name": account_name,
+        "company": company,
+        "root_type": root_type,
+        "report_type": report_type,
+        "is_group": is_group,
+        "account_currency": cc,
+    }
+    if account_type:
+        payload["account_type"] = account_type
+    if parent_account:
+        payload["parent_account"] = parent_account
+    try:
+        _create_system_doc("Account", payload, ignore_mandatory=True)
+    except frappe.DuplicateEntryError:
+        frappe.db.rollback()
+    return name
+
+
 def _get_default_expense_account(item_code: str, company: str):
     try:
-        account = _app_db().get_value(
+        account = frappe.db.get_value(
             "Item Default",
             {"parent": item_code, "company": company},
             "default_expense_account",
@@ -274,59 +362,74 @@ def _get_default_expense_account(item_code: str, company: str):
         pass
 
     try:
-        account = _app_db().get_value("Company", company, "default_expense_account")
+        account = frappe.db.get_value("Company", company, "default_expense_account")
         if account:
             return account
     except Exception:
         pass
 
-    rows = _app_db().get_all(
+    account = frappe.db.get_value(
+        "Account",
+        {"company": company, "account_type": "Expense Account", "is_group": 0},
+        "name",
+    )
+    if account:
+        return account
+
+    leaf_rows = frappe.get_all(
         "Account",
         filters={"company": company, "root_type": "Expense", "is_group": 0},
         fields=["name"],
         limit=1,
         order_by="name asc",
     )
-    if rows:
-        return _value(rows[0], "name")
+    if leaf_rows:
+        return leaf_rows[0].name
 
     abbr = _company_abbr(company)
     root_name = f"Expenses - {abbr}"
-    cc = _company_default_currency(company)
-    if not _app_db().get_value("Account", root_name, "name"):
-        _create_system_doc(
-            "Account",
-            {
-                "name": root_name,
-                "account_name": "Expenses",
-                "company": company,
-                "root_type": "Expense",
-                "report_type": "Profit and Loss",
-                "is_group": 1,
-                "account_currency": cc,
-            },
-            ignore_mandatory=True,
+    parent_group = _find_expense_group_parent(company, abbr)
+    if not parent_group:
+        _ensure_account_row(
+            root_name,
+            account_name="Expenses",
+            company=company,
+            root_type="Expense",
+            report_type="Profit and Loss",
+            is_group=1,
         )
+        parent_group = root_name if frappe.db.exists("Account", root_name) else None
 
     account_name = f"General Expenses - {abbr}"
-    if not _app_db().get_value("Account", account_name, "name"):
-        _create_system_doc(
-            "Account",
-            {
-                "name": account_name,
-                "account_name": "General Expenses",
-                "company": company,
-                "root_type": "Expense",
-                "report_type": "Profit and Loss",
-                "parent_account": root_name,
-                "account_type": "Expense Account",
-                "is_group": 0,
-                "account_currency": cc,
-            },
-            ignore_mandatory=True,
+    if not frappe.db.exists("Account", account_name) and parent_group:
+        _ensure_account_row(
+            account_name,
+            account_name="General Expenses",
+            company=company,
+            root_type="Expense",
+            report_type="Profit and Loss",
+            is_group=0,
+            account_type="Expense Account",
+            parent_account=parent_group,
         )
 
-    return account_name
+    if frappe.db.exists("Account", account_name):
+        return account_name
+
+    fallback_rows = frappe.get_all(
+        "Account",
+        filters={"company": company, "root_type": "Expense", "is_group": 0},
+        fields=["name"],
+        limit=1,
+    )
+    if fallback_rows:
+        return fallback_rows[0].name
+
+    raise frappe.ValidationError(
+        f"Could not find Parent Account: Expenses - {abbr}"
+        if not parent_group
+        else f"No expense account available for company {company!r}"
+    )
 
 
 def _ensure_company_round_off_cost_center(company: str, cost_center_name: str | None) -> None:
@@ -340,7 +443,7 @@ def _ensure_company_round_off_cost_center(company: str, cost_center_name: str | 
     if current:
         return
     try:
-        _app_db().set_value("Company", company, "round_off_cost_center", cost_center_name)
+        _set_company_field(company, "round_off_cost_center", cost_center_name)
     except Exception as exc:
         logger.warning(
             "ensure round_off_cost_center: could not set Company %r → %r (%s)",
@@ -370,7 +473,7 @@ def _get_default_cost_center(company: str):
     if rows:
         # Auto-set the found cost center as the default for the company
         cc_name = _value(rows[0], "name")
-        _app_db().set_value("Company", company, "cost_center", cc_name)
+        _set_company_field(company, "cost_center", cc_name)
         _ensure_company_round_off_cost_center(company, cc_name)
         return cc_name
 
@@ -398,7 +501,7 @@ def _get_default_cost_center(company: str):
     )
 
     # Set as default for the company
-    _app_db().set_value("Company", company, "cost_center", cost_center_name)
+    _set_company_field(company, "cost_center", cost_center_name)
     _ensure_company_round_off_cost_center(company, cost_center_name)
     return cost_center_name
 
@@ -436,7 +539,7 @@ def _ensure_default_payable_account(company: str):
         )
         
     if existing:
-        _app_db().set_value("Company", company, "default_payable_account", existing[0].get("name"))
+        _set_company_field(company, "default_payable_account", existing[0].get("name"))
         return
 
     # Not found, create it
@@ -574,7 +677,7 @@ def _ensure_company_default_currency(company: str) -> None:
         return
     try:
         for field, value in updates.items():
-            _app_db().set_value("Company", company, field, value)
+            _set_company_field(company, field, value)
         cached = getattr(frappe.flags, "company_currency", None)
         if isinstance(cached, dict):
             cached.pop(company, None)
@@ -728,13 +831,26 @@ def _ensure_all_company_accounts_currency(company: str) -> None:
                 )
 
 
-def ensure_purchase_invoice_submit_prereqs(company: str, supplier: str | None) -> None:
+def ensure_purchase_invoice_item_defaults(doc) -> None:
+    """Set child-row defaults ERPNext 16 expects when site DocType sync lags app code."""
+    for item in _value(doc, "items", []) or []:
+        if _value(item, "delivered_by_supplier", None) is None:
+            _set_value(item, "delivered_by_supplier", 0)
+
+
+def ensure_purchase_invoice_submit_prereqs(
+    company: str, supplier: str | None, posting_date=None,
+) -> None:
     """Patch master data before doc.submit() so currency / exchange-rate validation passes."""
     _ensure_company_default_currency(company)
     _get_default_cost_center(company)
     _ensure_default_payable_account(company)
     _ensure_all_company_accounts_currency(company)
     _ensure_default_payable_account_currency(company)
+    if company and posting_date is not None:
+        _ensure_fiscal_year(posting_date, company)
+    elif company:
+        _ensure_fiscal_year(None, company)
     if supplier:
         _ensure_supplier_party_currency(supplier, company)
         frappe.clear_document_cache("Supplier", supplier)
@@ -903,22 +1019,36 @@ def _ensure_item_group(group_name: str) -> str:
     if not group_name or group_name == "All Item Groups":
         return "All Item Groups"
 
-    existing = _app_db().get_value("Item Group", group_name, "name")
-    if existing:
-        return existing
-
-    try:
-        doc = _app_db().insert_doc("Item Group", {
-            "name": group_name,
-            "item_group_name": group_name,
-            "parent_item_group": "All Item Groups",
-            "is_group": 0,
-        }, ignore_permissions=True)
-        frappe.db.commit()
-        return doc.name
-    except frappe.DuplicateEntryError:
-        frappe.db.rollback()
+    if frappe.db.exists("Item Group", group_name):
         return group_name
+
+    # SQL insert avoids loading saas_platform.overrides.item_group.TenantItemGroup when
+    # the bench app is missing overrides/__init__.py (common in older central-site images).
+    try:
+        frappe.db.sql(
+            """
+            INSERT IGNORE INTO `tabItem Group`
+            (name, item_group_name, parent_item_group, is_group, lft, rgt,
+             creation, modified, modified_by, owner, docstatus, idx)
+            VALUES (%s, %s, 'All Item Groups', 0, 1, 2,
+                    NOW(), NOW(), 'Administrator', 'Administrator', 0, 0)
+            """,
+            (group_name, group_name),
+        )
+        tenant_id = None
+        try:
+            tenant_id = _app_db().get_tenant_id()
+        except Exception:
+            pass
+        if tenant_id and frappe.db.has_column("Item Group", "tenant_id"):
+            frappe.db.sql(
+                "UPDATE `tabItem Group` SET tenant_id = %s WHERE name = %s",
+                (tenant_id, group_name),
+            )
+        frappe.db.commit()
+    except Exception as exc:
+        logger.warning("_ensure_item_group(%r): %s", group_name, exc)
+    return group_name
 
 
 def _resolve_item_code(item_name: str, item_group: str) -> str:
@@ -1004,7 +1134,7 @@ class PurchaseInvoice(DocumentController):
         if getattr(doc.flags, "expense_pi_enriched", False):
             return
 
-        company = _resolve_company_from_user() or _value(self, "company", None)
+        company = _value(self, "company", None) or _resolve_company_from_user()
         if not company:
             logger.warning("before_validate: no company resolved, skipping enrichment")
             return
@@ -1040,6 +1170,11 @@ class PurchaseInvoice(DocumentController):
         primary_item_group = None
 
         for idx, item_data in enumerate(raw_items):
+            # ERPNext 16 AccountsController.is_drop_ship reads this on child rows;
+            # microservice sites may lag ERPNext DocType sync so set explicitly.
+            if _value(item_data, "delivered_by_supplier", None) is None:
+                _set_value(item_data, "delivered_by_supplier", 0)
+
             item_code, item_group = _resolve_item_identity(item_data)
             if not item_code:
                 self.append("items", item_data)

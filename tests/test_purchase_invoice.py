@@ -363,8 +363,15 @@ def test_purchase_invoice_company_resolved_from_session():
             return "Session Company Pty Ltd"  # user default company
         if doctype == "Item":
             return filters
+        if doctype == "Company" and field == "abbr":
+            if filters == "Wrong Company":
+                return "WRONG"
+            if filters == "Session Company Pty Ltd":
+                return "SESS"
         if doctype == "Company" and filters == "Session Company Pty Ltd" and field == "cost_center":
             return "Session CC"
+        if doctype == "Company" and filters == "Wrong Company" and field == "cost_center":
+            return "Wrong CC"
         return None
 
     mock_frappe.db.get_value.side_effect = db_get_value
@@ -373,15 +380,24 @@ def test_purchase_invoice_company_resolved_from_session():
     doc = PurchaseInvoice(
         {
             "doctype": "Purchase Invoice",
-            "company": "Wrong Company",  # should be overridden
+            "company": "Wrong Company",  # explicit POST company is kept (Cypress env)
             "items": [{"item_code": "Fuel", "expense_account": None}],
         }
     )
 
     doc.before_validate()
 
-    assert doc.company == "Session Company Pty Ltd"
-    assert doc.items[0]["cost_center"] == "Session CC"
+    assert doc.company == "Wrong Company"
+
+    doc2 = PurchaseInvoice(
+        {
+            "doctype": "Purchase Invoice",
+            "items": [{"item_code": "Fuel", "expense_account": None}],
+        }
+    )
+    doc2.before_validate()
+    assert doc2.company == "Session Company Pty Ltd"
+    assert doc2.items[0]["cost_center"] == "Session CC"
 
 
 def test_dashboard_summary_returns_aggregates():
@@ -899,8 +915,10 @@ def test_purchase_invoice_bootstraps_missing_cost_center():
     # Verify: Root and Main CCs should be created
     assert mock_app.db.insert_doc.call_count >= 2
     
-    # Verify: Company should be updated with Main CC
-    mock_app.db.set_value.assert_any_call("Company", "Acme Pty Ltd", "cost_center", "Main - ACME")
+    # Verify: Company should be updated with Main CC (via frappe.db, not tenant_db)
+    mock_frappe.db.set_value.assert_any_call(
+        "Company", "Acme Pty Ltd", "cost_center", "Main - ACME", update_modified=False
+    )
 
 
 # ── Custom field (expense_item_name / expense_item_group / expense_items_count) tests ──
@@ -1134,7 +1152,12 @@ def test_frappe_client_submit_skips_title_when_no_db_column():
     result = frappe_client_submit("user@example.com")
 
     assert result["success"] is True
-    mock_frappe.db.set_value.assert_not_called()
+    title_updates = [
+        c
+        for c in mock_frappe.db.set_value.call_args_list
+        if c[0] and c[0][0] == "Purchase Invoice" and len(c[0]) > 2 and c[0][2] == "title"
+    ]
+    assert not title_updates
     mock_pi_doc.submit.assert_called_once()
 
 

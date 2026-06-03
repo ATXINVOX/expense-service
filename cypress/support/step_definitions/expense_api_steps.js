@@ -57,13 +57,102 @@ function gatewayBaseUrl() {
   return defaultGatewayBaseUrl();
 }
 
+function gatewayExtraHeaders() {
+  const headers = {};
+  const base = frappeBaseUrl();
+  if (/localhost:9080|:9080\b/.test(base) || Cypress.env("FRAPPE_SITE_HOST")) {
+    headers.Host = Cypress.env("FRAPPE_SITE_HOST") || "dev.localhost";
+  }
+  return headers;
+}
+
 function sessionHeaders() {
   return {
     "Content-Type": "application/json",
     Accept: "application/json",
     "X-Requested-With": "XMLHttpRequest",
+    ...gatewayExtraHeaders(),
+    ...(state.csrfToken ? { "X-Frappe-CSRF-Token": state.csrfToken } : {}),
     ...(state.sid ? { Cookie: `sid=${state.sid}`, "X-Frappe-SID": state.sid } : {}),
   };
+}
+
+function expenseTestTenantId() {
+  return (
+    Cypress.env("EXPENSE_TEST_TENANT_ID") ||
+    Cypress.env("TEST_TENANT_ID") ||
+    "expense-integ-tenant-001"
+  );
+}
+
+/** Ensure Administrator has a non-SYSTEM tenant_id (required by expense-service). */
+function ensureExpenseAdministratorTenantContext() {
+  if (!state.sid) return cy.wrap(null);
+
+  const tenantId = expenseTestTenantId();
+  const headers = sessionHeaders();
+  const apiBase = frappeBaseUrl();
+
+  const probeExpense = () =>
+    cy.request({
+      method: "GET",
+      url: `${serviceBaseUrl()}/api/method/expense_tracker.api.get_dashboard_summary`,
+      headers,
+      failOnStatusCode: false,
+    });
+
+  return probeExpense().then((probeRes) => {
+    const msg = String(probeRes.body?.message || "");
+    const tenantMissing = probeRes.status === 400 && /No tenant_id/i.test(msg);
+    if (!tenantMissing && probeRes.status === 200) {
+      return;
+    }
+
+    cy.log(`Bootstrapping Administrator tenant_id=${tenantId} via ${apiBase}`);
+    return cy
+      .request({
+        method: "POST",
+        url: `${apiBase}/api/method/frappe.client.set_value`,
+        headers,
+        body: {
+          doctype: "User",
+          name: "Administrator",
+          fieldname: "tenant_id",
+          value: tenantId,
+        },
+        failOnStatusCode: false,
+      })
+      .then((setRes) => {
+        if (setRes.status !== 200) {
+          cy.log(
+            `frappe.client.set_value tenant_id: HTTP ${setRes.status} ${JSON.stringify(setRes.body)}`,
+          );
+        }
+        const company = Cypress.env("EXPENSE_TEST_COMPANY") || "_Test Expense Integ Co";
+        return cy.request({
+          method: "POST",
+          url: `${apiBase}/api/method/frappe.client.set_value`,
+          headers,
+          body: {
+            doctype: "DefaultValue",
+            filters: { parent: "Administrator", defkey: "company" },
+            fieldname: "defvalue",
+            value: company,
+          },
+          failOnStatusCode: false,
+        });
+      })
+      .then(() => probeExpense())
+      .then((verifyRes) => {
+        if (verifyRes.status !== 200) {
+          cy.log(
+            `After tenant bootstrap, expense dashboard still HTTP ${verifyRes.status}: ${JSON.stringify(
+              verifyRes.body,
+            )}. Run: ./scripts/bootstrap_dev_cypress.sh`,
+          );
+        }
+      });
+  });
 }
 
 function responsePayload() {
@@ -247,10 +336,12 @@ Given("I login to the expense service as {string}", (user) => {
   if (envSid && String(envSid).trim()) {
     state.sid = String(envSid).trim();
     cy.log(`Using EXPENSE_TEST_SID from environment for ${user}`);
+    cy.then(() => ensureExpenseAdministratorTenantContext());
     return;
   }
   const pwd = Cypress.env("ADMIN_PASSWORD") || "admin";
   _loginAsFrappeUser(user, pwd);
+  cy.then(() => ensureExpenseAdministratorTenantContext());
 });
 
 Given("I login to the expense service as {string} with password {string}", (user, pwd) => {
@@ -258,9 +349,22 @@ Given("I login to the expense service as {string} with password {string}", (user
   if (envSid && String(envSid).trim()) {
     state.sid = String(envSid).trim();
     cy.log(`Using EXPENSE_TEST_SID from environment for ${user}`);
+    cy.then(() => ensureExpenseAdministratorTenantContext());
     return;
   }
   _loginAsFrappeUser(user, pwd);
+  cy.then(() => ensureExpenseAdministratorTenantContext());
+});
+
+Given("I am logged in as a provisioned user", () => {
+  const pwd = Cypress.env("ADMIN_PASSWORD") || "admin";
+  const envSid = Cypress.env("EXPENSE_TEST_SID");
+  if (envSid && String(envSid).trim()) {
+    state.sid = String(envSid).trim();
+  } else {
+    _loginAsFrappeUser("Administrator", pwd);
+  }
+  cy.then(() => ensureExpenseAdministratorTenantContext());
 });
 
 function _loginAsFrappeUser(user, pwd) {
@@ -272,6 +376,7 @@ function _loginAsFrappeUser(user, pwd) {
   }
 
   const captureSid = (res) => {
+    state.csrfToken = extractCsrfFromResponseBody(res.body) || state.csrfToken;
     const bodySid = res.body?.sid;
     if (bodySid && bodySid !== "Guest") {
       state.sid = bodySid;
@@ -306,6 +411,7 @@ function _loginAsFrappeUser(user, pwd) {
     headers: {
       "Content-Type": "application/json",
       Accept: "application/json",
+      ...gatewayExtraHeaders(),
     },
     body: { usr: user, pwd },
     failOnStatusCode: false,
