@@ -117,6 +117,7 @@ from expense_tracker.api import (
     _aggregate_by_posting_date,
     _app_db,
     _daily_series,
+    _get_recent_quotations,
     _project_purchase_invoice_api,
     _resolve_financial_period,
 )
@@ -132,9 +133,12 @@ def reset_mocks():
     mock_frappe.db.reset_mock()
     mock_frappe.db.has_column = MagicMock(return_value=True)
     mock_frappe.get_all.reset_mock()
+    mock_frappe.get_all.side_effect = None
+    mock_frappe.get_all.return_value = []
     mock_frappe.get_doc.reset_mock()
-    mock_app.tenant_db.get_value.side_effect = lambda *args, **kwargs: mock_frappe.db.get_value(*args, **kwargs)
     mock_app.tenant_db.get_all.side_effect = lambda *args, **kwargs: mock_frappe.get_all(*args, **kwargs)
+    mock_app.tenant_db.get_value.side_effect = lambda *args, **kwargs: mock_frappe.db.get_value(*args, **kwargs)
+    mock_app.tenant_db.get_tenant_id.return_value = "test-tenant-001"
     if "flask" in sys.modules and hasattr(sys.modules["flask"], "request"):
         sys.modules["flask"].request.reset_mock()
         sys.modules["flask"].request.args = _EmptyRequestArgs()
@@ -674,17 +678,6 @@ def test_financial_dashboard_custom_daily_totals_and_activity():
                         "status": "Draft",
                     },
                 ]
-            if doctype == "Quotation":
-                return [
-                    {
-                        "name": "SAL-QTN-2026-00001",
-                        "customer_name": "Prospect Co",
-                        "transaction_date": date(2026, 5, 3),
-                        "grand_total": 500.0,
-                        "modified": datetime(2026, 5, 4, 12, 0, 0),
-                        "status": "Open",
-                    },
-                ]
             return []
         if doctype == "Sales Invoice":
             return [
@@ -698,6 +691,24 @@ def test_financial_dashboard_custom_daily_totals_and_activity():
         return []
 
     mock_app.tenant_db.get_all.side_effect = financial_get_all
+
+    def quotation_get_all(doctype, *args, **kwargs):
+        if doctype == "Quotation":
+            return [
+                {
+                    "name": "SAL-QTN-2026-00001",
+                    "customer_name": "Prospect Co",
+                    "party_name": "Prospect Co",
+                    "transaction_date": date(2026, 5, 3),
+                    "grand_total": 500.0,
+                    "modified": datetime(2026, 5, 4, 12, 0, 0),
+                    "status": "Open",
+                    "docstatus": 1,
+                },
+            ]
+        return []
+
+    mock_frappe.get_all.side_effect = quotation_get_all
     mock_frappe.db.get_value.return_value = "AUD"
 
     result = get_financial_dashboard("test_user")
@@ -719,6 +730,69 @@ def test_financial_dashboard_custom_daily_totals_and_activity():
     doctypes = {r["doctype"] for r in result["recent_activity"]}
     assert "Quotation" in doctypes
     assert "Purchase Invoice" in doctypes
+
+
+def test_get_recent_quotations_matches_saas_platform_tenant_visibility():
+    mock_frappe.get_all.return_value = []
+    _get_recent_quotations("Acme Pty Ltd", 20, "tenant-abc-001")
+    mock_frappe.get_all.assert_called_once_with(
+        "Quotation",
+        filters=[
+            ["company", "=", "Acme Pty Ltd"],
+        ],
+        or_filters=[
+            ["tenant_id", "=", "tenant-abc-001"],
+            ["tenant_id", "=", "SYSTEM"],
+            ["tenant_id", "is", "not set"],
+            ["tenant_id", "=", ""],
+        ],
+        fields=[
+            "name",
+            "customer_name",
+            "party_name",
+            "transaction_date",
+            "grand_total",
+            "modified",
+            "status",
+            "docstatus",
+        ],
+        order_by="modified desc",
+        limit=20,
+    )
+
+
+def test_financial_dashboard_includes_cancelled_quotations():
+    mock_frappe.defaults = MagicMock()
+    mock_frappe.defaults.get_user_default.return_value = "Acme Pty Ltd"
+    sys.modules["flask"].request.args = _FakeArgs({"preset": "last_7_days"})
+
+    mock_app.tenant_db.get_all.return_value = []
+
+    def quotation_get_all(doctype, *args, **kwargs):
+        if doctype == "Quotation":
+            return [
+                {
+                    "name": "SAL-QTN-CANCELLED",
+                    "customer_name": "Lost Co",
+                    "party_name": "Lost Co",
+                    "transaction_date": date(2026, 6, 1),
+                    "grand_total": 99.0,
+                    "modified": datetime(2026, 6, 3, 9, 0, 0),
+                    "status": "Cancelled",
+                    "docstatus": 2,
+                },
+            ]
+        return []
+
+    mock_frappe.get_all.side_effect = quotation_get_all
+    mock_frappe.db.get_value.return_value = "AUD"
+
+    result = get_financial_dashboard("test_user")
+    q_rows = [r for r in result["recent_activity"] if r["doctype"] == "Quotation"]
+    assert len(q_rows) == 1
+    assert q_rows[0]["name"] == "SAL-QTN-CANCELLED"
+    assert q_rows[0]["status"] == "Cancelled"
+    assert q_rows[0]["docstatus"] == 2
 
 
 def test_financial_dashboard_custom_requires_dates():

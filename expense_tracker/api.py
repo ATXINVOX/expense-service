@@ -329,6 +329,42 @@ def _sales_invoice_filters(company: str, from_date: date, to_date: date):
     ]
 
 
+def _get_recent_quotations(company: str, act_limit: int, tenant_id: str):
+    """Recent quotations for financial dashboard activity (all lifecycle states).
+
+    Includes draft, submitted, and cancelled quotations — dashboard activity is
+    informational, not limited to open/active docs.
+
+    Uses saas_platform-aligned visibility (own tenant + SYSTEM + unset legacy rows).
+    ``tenant_db.get_all`` only matches an exact ``tenant_id``, which hides quotations
+    created on central-site or before tenant backfill (often ``SYSTEM`` / NULL).
+    """
+    return frappe.get_all(
+        "Quotation",
+        filters=[
+            ["company", "=", company],
+        ],
+        or_filters=[
+            ["tenant_id", "=", tenant_id],
+            ["tenant_id", "=", "SYSTEM"],
+            ["tenant_id", "is", "not set"],
+            ["tenant_id", "=", ""],
+        ],
+        fields=[
+            "name",
+            "customer_name",
+            "party_name",
+            "transaction_date",
+            "grand_total",
+            "modified",
+            "status",
+            "docstatus",
+        ],
+        order_by="modified desc",
+        limit=act_limit,
+    )
+
+
 def _add_months(d: date, months: int) -> date:
     """Shift date by calendar months (day clipped to last day of target month)."""
     month_idx = d.month - 1 + months
@@ -1090,7 +1126,8 @@ def get_financial_dashboard(user):
     Uses the same tenant DB access patterns as the Resource API (``get_all`` on SI / PI / Quotation).
 
     ``recent_activity`` merges the latest Sales Invoices, Purchase Invoices, and Quotations
-    for the company (by ``modified``). Quotations do not affect income/expense totals or ``daily``.
+    for the company (by ``modified``). Quotations include all states (draft, submitted,
+    cancelled, open, lost, etc.) and do not affect income/expense totals or ``daily``.
 
     Query parameters:
 
@@ -1118,6 +1155,8 @@ def get_financial_dashboard(user):
     except (TypeError, ValueError):
         act_limit = 20
     act_limit = max(1, min(act_limit, 50))
+
+    tenant_id = db.get_tenant_id()
 
     si_filters = _sales_invoice_filters(company, from_date, to_date)
     pi_filters = _invoice_filters(company, from_date, to_date)
@@ -1171,20 +1210,7 @@ def get_financial_dashboard(user):
         order_by="modified desc",
         limit=act_limit,
     )
-    q_recent = db.get_all(
-        "Quotation",
-        filters=[["company", "=", company], ["docstatus", "<", 2]],
-        fields=[
-            "name",
-            "customer_name",
-            "transaction_date",
-            "grand_total",
-            "modified",
-            "status",
-        ],
-        order_by="modified desc",
-        limit=act_limit,
-    )
+    q_recent = _get_recent_quotations(company, act_limit, tenant_id)
 
     merged = []
     for row in si_recent or []:
@@ -1223,15 +1249,17 @@ def get_financial_dashboard(user):
         )
     for row in q_recent or []:
         name = row.get("name")
+        docstatus = int(row.get("docstatus") or 0)
         merged.append(
             {
                 "doctype": "Quotation",
                 "name": name,
-                "party": row.get("customer_name"),
+                "party": row.get("customer_name") or row.get("party_name"),
                 "posting_date": row.get("transaction_date"),
                 "amount": _as_number(row.get("grand_total")),
                 "modified": row.get("modified"),
                 "status": row.get("status"),
+                "docstatus": docstatus,
                 "resource_path": "/api/resource/"
                 + urllib.parse.quote("Quotation")
                 + "/"
