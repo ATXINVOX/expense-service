@@ -283,16 +283,101 @@ def _cashflow_year_months(rows, year: int, range_end: date) -> list[dict]:
     return [{"label": months[i], "amount": round(buckets[i], 2)} for i in range(12)]
 
 
+def _resolve_tenant_id(db) -> str:
+    tenant_id = ""
+    try:
+        get_tid = getattr(db, "get_tenant_id", None)
+        if callable(get_tid):
+            raw_tid = get_tid()
+            if isinstance(raw_tid, str):
+                tenant_id = raw_tid.strip()
+    except Exception:
+        pass
+    return tenant_id
+
+
+def _tenant_or_filters(tenant_id: str) -> list:
+    return [
+        ["tenant_id", "=", tenant_id],
+        ["tenant_id", "=", "SYSTEM"],
+        ["tenant_id", "is", "not set"],
+        ["tenant_id", "=", ""],
+    ]
+
+
+def _fetch_recent_purchase_invoices(company: str, limit: int, fields: list[str]):
+    """Latest purchase invoices for dashboard — not limited to the chart period window.
+
+    Uses saas_platform tenant visibility (own tenant + SYSTEM + legacy unset rows).
+  """
+    db = _app_db()
+    tenant_id = _resolve_tenant_id(db)
+    base_filters = [
+        ["company", "=", company],
+        ["docstatus", "<", 2],
+    ]
+    row_limit = max(1, min(int(limit or 10), 50))
+
+    if tenant_id:
+        return frappe.get_all(
+            "Purchase Invoice",
+            filters=base_filters,
+            or_filters=_tenant_or_filters(tenant_id),
+            fields=fields,
+            order_by="modified desc",
+            limit=row_limit,
+        )
+
+    return db.get_all(
+        "Purchase Invoice",
+        filters=base_filters,
+        fields=fields,
+        order_by="modified desc",
+        limit=row_limit,
+    )
+
+
+def _fetch_recent_sales_invoices(company: str, limit: int):
+    """Latest sales invoices for financial-dashboard activity (no period window)."""
+    db = _app_db()
+    tenant_id = _resolve_tenant_id(db)
+    base_filters = [
+        ["company", "=", company],
+        ["docstatus", "<", 2],
+    ]
+    fields = [
+        "name",
+        "customer",
+        "posting_date",
+        "grand_total",
+        "modified",
+        "status",
+    ]
+    row_limit = max(1, min(int(limit or 20), 50))
+
+    if tenant_id:
+        return frappe.get_all(
+            "Sales Invoice",
+            filters=base_filters,
+            or_filters=_tenant_or_filters(tenant_id),
+            fields=fields,
+            order_by="modified desc",
+            limit=row_limit,
+        )
+
+    return db.get_all(
+        "Sales Invoice",
+        filters=base_filters,
+        fields=fields,
+        order_by="modified desc",
+        limit=row_limit,
+    )
+
+
 def _recent_expenses_from_rows(rows, limit: int = 10) -> list[dict]:
-    """Project dashboard recent expenses from Purchase Invoice list rows."""
-
-    def _posting_key(row):
-        pd = _parse_posting_date_value(row.get("posting_date"))
-        return pd or _dt.date.min
-
-    ordered = sorted(rows or [], key=_posting_key, reverse=True)
+    """Project dashboard recent expenses (rows already ordered by modified desc)."""
     out = []
-    for row in ordered[: max(1, min(int(limit or 10), 50))]:
+    for row in (rows or [])[: max(1, min(int(limit or 10), 50))]:
         out.append(
             {
                 "id": row.get("name"),
@@ -1006,6 +1091,8 @@ def get_dashboard_summary(user, from_date=None, to_date=None):
         fields=inv_fields,
     )
 
+    recent_rows = _fetch_recent_purchase_invoices(company, recent_limit, inv_fields)
+
     breakdown = {}
     if invoices:
         invoice_names = [row.get("name") for row in invoices]
@@ -1057,7 +1144,7 @@ def get_dashboard_summary(user, from_date=None, to_date=None):
         "currency": currency,
         "period": period_label_out,
         "breakdown": breakdown_rows,
-        "recent_expenses": _recent_expenses_from_rows(invoices, recent_limit),
+        "recent_expenses": _recent_expenses_from_rows(recent_rows, recent_limit),
     }
 
     if use_preset:
@@ -1156,7 +1243,7 @@ def get_financial_dashboard(user):
         act_limit = 20
     act_limit = max(1, min(act_limit, 50))
 
-    tenant_id = db.get_tenant_id()
+    tenant_id = _resolve_tenant_id(db)
 
     si_filters = _sales_invoice_filters(company, from_date, to_date)
     pi_filters = _invoice_filters(company, from_date, to_date)
@@ -1181,35 +1268,17 @@ def get_financial_dashboard(user):
 
     currency = db.get_value("Company", company, "default_currency") or "AUD"
 
-    # Recent activity: latest modified SI + PI for this company (Resource API–compatible fields).
-    si_recent = db.get_all(
-        "Sales Invoice",
-        filters=[["company", "=", company], ["docstatus", "<", 2]],
-        fields=[
-            "name",
-            "customer",
-            "posting_date",
-            "grand_total",
-            "modified",
-            "status",
-        ],
-        order_by="modified desc",
-        limit=act_limit,
-    )
-    pi_recent = db.get_all(
-        "Purchase Invoice",
-        filters=[["company", "=", company], ["docstatus", "<", 2]],
-        fields=[
-            "name",
-            "supplier",
-            "posting_date",
-            "grand_total",
-            "modified",
-            "status",
-        ],
-        order_by="modified desc",
-        limit=act_limit,
-    )
+    # Recent activity: latest modified SI + PI (no period window; tenant-aware visibility).
+    si_recent = _fetch_recent_sales_invoices(company, act_limit)
+    pi_recent_fields = [
+        "name",
+        "supplier",
+        "posting_date",
+        "grand_total",
+        "modified",
+        "status",
+    ]
+    pi_recent = _fetch_recent_purchase_invoices(company, act_limit, pi_recent_fields)
     q_recent = _get_recent_quotations(company, act_limit, tenant_id)
 
     merged = []

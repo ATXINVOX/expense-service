@@ -117,6 +117,7 @@ from expense_tracker.api import (
     _aggregate_by_posting_date,
     _app_db,
     _daily_series,
+    _fetch_recent_purchase_invoices,
     _get_recent_quotations,
     _project_purchase_invoice_api,
     _resolve_financial_period,
@@ -641,6 +642,72 @@ def test_dashboard_summary_preset_breakdown_top4_merges_remainder_as_others():
     assert abs(pct_sum - 100.0) < 0.1
 
 
+def test_dashboard_recent_expenses_outside_period_with_tenant_visibility():
+    """Recent list is not limited to the dashboard period and uses tenant or_filters."""
+    fixed_today = date(2026, 6, 11)
+    sys.modules["flask"].request.args = _FakeArgs({"period": "month", "recent_limit": "5"})
+    mock_frappe.defaults = MagicMock()
+    mock_frappe.defaults.get_user_default.return_value = "Acme Pty Ltd"
+    mock_frappe.db.get_value.return_value = "AUD"
+
+    old_posting = fixed_today - timedelta(days=120)
+    recent_row = {
+        "name": "ACC-PINV-OLD",
+        "supplier": "Legacy Supplier",
+        "posting_date": old_posting,
+        "status": "Draft",
+        "grand_total": 888.0,
+        "total_taxes_and_charges": 0.0,
+        "currency": "AUD",
+        "remarks": "Old expense",
+        "expense_item_name": "Travel",
+        "expense_item_group": "Travel",
+        "modified": datetime.combine(fixed_today, datetime.min.time()),
+    }
+
+    with patch("expense_tracker.api.date", _date_class_with_fixed_today(fixed_today)), patch(
+        "expense_tracker.api._get_frappe_today", return_value=fixed_today
+    ):
+        mock_app.db.get_all.side_effect = [[], []]
+        mock_frappe.get_all.return_value = [recent_row]
+        result = get_dashboard_summary("test_user")
+
+    assert result["total_spend"] == 0.0
+    assert len(result["recent_expenses"]) == 1
+    assert result["recent_expenses"][0]["name"] == "ACC-PINV-OLD"
+    assert result["recent_expenses"][0]["supplier"] == "Legacy Supplier"
+    assert result["recent_expenses"][0]["amount"] == 888.0
+
+    recent_calls = [
+        c
+        for c in mock_frappe.get_all.call_args_list
+        if c.args and c.args[0] == "Purchase Invoice"
+    ]
+    assert len(recent_calls) == 1
+    assert recent_calls[0].kwargs.get("order_by") == "modified desc"
+    assert recent_calls[0].kwargs.get("or_filters") == [
+        ["tenant_id", "=", "test-tenant-001"],
+        ["tenant_id", "=", "SYSTEM"],
+        ["tenant_id", "is", "not set"],
+        ["tenant_id", "=", ""],
+    ]
+
+
+def test_fetch_recent_purchase_invoices_without_tenant_uses_db_get_all():
+    mock_app.tenant_db.get_tenant_id.return_value = ""
+    mock_app.tenant_db.get_all.side_effect = None
+    mock_app.tenant_db.get_all.return_value = [{"name": "PI-1"}]
+    mock_frappe.get_all.reset_mock()
+    rows = _fetch_recent_purchase_invoices(
+        "Acme Pty Ltd",
+        5,
+        ["name", "supplier", "posting_date", "grand_total"],
+    )
+    assert rows == [{"name": "PI-1"}]
+    mock_app.tenant_db.get_all.assert_called_once()
+    mock_frappe.get_all.assert_not_called()
+
+
 def test_financial_dashboard_custom_daily_totals_and_activity():
     mock_frappe.defaults = MagicMock()
     mock_frappe.defaults.get_user_default.return_value = "Acme Pty Ltd"
@@ -654,7 +721,21 @@ def test_financial_dashboard_custom_daily_totals_and_activity():
         }
     )
 
-    def financial_get_all(doctype, *args, **kwargs):
+    def period_get_all(doctype, *args, **kwargs):
+        if doctype == "Sales Invoice":
+            return [
+                {"name": "SINV-1", "posting_date": date(2026, 5, 1), "grand_total": 100.0},
+                {"name": "SINV-2", "posting_date": date(2026, 5, 3), "grand_total": 50.0},
+            ]
+        if doctype == "Purchase Invoice":
+            return [
+                {"name": "PINV-1", "posting_date": date(2026, 5, 2), "grand_total": 40.0},
+            ]
+        return []
+
+    mock_app.tenant_db.get_all.side_effect = period_get_all
+
+    def recent_get_all(doctype, *args, **kwargs):
         if kwargs.get("order_by"):
             if doctype == "Sales Invoice":
                 return [
@@ -678,21 +759,6 @@ def test_financial_dashboard_custom_daily_totals_and_activity():
                         "status": "Draft",
                     },
                 ]
-            return []
-        if doctype == "Sales Invoice":
-            return [
-                {"name": "SINV-1", "posting_date": date(2026, 5, 1), "grand_total": 100.0},
-                {"name": "SINV-2", "posting_date": date(2026, 5, 3), "grand_total": 50.0},
-            ]
-        if doctype == "Purchase Invoice":
-            return [
-                {"name": "PINV-1", "posting_date": date(2026, 5, 2), "grand_total": 40.0},
-            ]
-        return []
-
-    mock_app.tenant_db.get_all.side_effect = financial_get_all
-
-    def quotation_get_all(doctype, *args, **kwargs):
         if doctype == "Quotation":
             return [
                 {
@@ -708,7 +774,7 @@ def test_financial_dashboard_custom_daily_totals_and_activity():
             ]
         return []
 
-    mock_frappe.get_all.side_effect = quotation_get_all
+    mock_frappe.get_all.side_effect = recent_get_all
     mock_frappe.db.get_value.return_value = "AUD"
 
     result = get_financial_dashboard("test_user")
@@ -875,7 +941,7 @@ def test_financial_dashboard_activity_limit_is_capped_at_50():
         }
     )
 
-    def financial_get_all(doctype, *args, **kwargs):
+    def recent_get_all(doctype, *args, **kwargs):
         if kwargs.get("order_by"):
             lim = kwargs.get("limit", 20)
             if doctype == "Sales Invoice":
@@ -904,7 +970,8 @@ def test_financial_dashboard_activity_limit_is_capped_at_50():
                 ]
         return []
 
-    mock_app.tenant_db.get_all.side_effect = financial_get_all
+    mock_app.tenant_db.get_all.return_value = []
+    mock_frappe.get_all.side_effect = recent_get_all
     mock_frappe.db.get_value.return_value = "AUD"
 
     result = get_financial_dashboard("test_user")
@@ -923,7 +990,7 @@ def test_financial_dashboard_malformed_activity_limit_defaults_to_20():
         }
     )
 
-    def financial_get_all(doctype, *args, **kwargs):
+    def recent_get_all(doctype, *args, **kwargs):
         if kwargs.get("order_by"):
             lim = kwargs.get("limit", 20)
             if doctype == "Sales Invoice":
@@ -952,7 +1019,8 @@ def test_financial_dashboard_malformed_activity_limit_defaults_to_20():
                 ]
         return []
 
-    mock_app.tenant_db.get_all.side_effect = financial_get_all
+    mock_app.tenant_db.get_all.return_value = []
+    mock_frappe.get_all.side_effect = recent_get_all
     mock_frappe.db.get_value.return_value = "AUD"
 
     result = get_financial_dashboard("test_user")
