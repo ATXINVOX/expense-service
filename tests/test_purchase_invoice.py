@@ -577,6 +577,46 @@ def test_dashboard_summary_invalid_period_raises():
         get_dashboard_summary("test_user")
 
 
+def test_dashboard_summary_custom_range_cashflow_and_trend():
+    sys.modules["flask"].request.args = _FakeArgs(
+        {"from_date": "2026-02-01", "to_date": "2026-02-28"}
+    )
+    mock_frappe.defaults = MagicMock()
+    mock_frappe.defaults.get_user_default.return_value = "Acme Pty Ltd"
+    mock_frappe.db.get_value.return_value = "AUD"
+
+    mock_app.tenant_db.get_all.side_effect = [
+        [
+            {
+                "name": "PI-1",
+                "grand_total": 200.0,
+                "total_taxes_and_charges": 20.0,
+                "posting_date": date(2026, 2, 10),
+            },
+        ],
+        [{"item_group": "Fuel", "amount": 200.0}],
+        [{"grand_total": 100.0}],
+    ]
+    result = get_dashboard_summary("test_user")
+
+    assert result["preset"] == "custom"
+    assert result["from_date"] == "2026-02-01"
+    assert result["to_date"] == "2026-02-28"
+    assert result["trend_pct"] == 100.0
+    assert result["compare_period_label"] == "vs prior period"
+    assert result["cashflow"][1]["label"] == "W2"
+    assert result["cashflow"][1]["amount"] == 200.0
+    assert result["top_category"]["item_group"] == "Fuel"
+
+
+def test_dashboard_summary_custom_period_param_requires_dates():
+    sys.modules["flask"].request.args = _FakeArgs({"period": "custom"})
+    mock_frappe.defaults = MagicMock()
+    mock_frappe.defaults.get_user_default.return_value = "Acme Pty Ltd"
+    with pytest.raises(RuntimeError, match="from_date and to_date"):
+        get_dashboard_summary("test_user")
+
+
 def test_dashboard_summary_preset_week_uppercase_period():
     fixed_today = date(2026, 5, 7)
     sys.modules["flask"].request.args = _FakeArgs({"period": "WEEK"})

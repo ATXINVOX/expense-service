@@ -283,6 +283,75 @@ def _cashflow_year_months(rows, year: int, range_end: date) -> list[dict]:
     return [{"label": months[i], "amount": round(buckets[i], 2)} for i in range(12)]
 
 
+def _cashflow_daily_range(rows, range_start: date, range_end: date) -> list[dict]:
+    span = (range_end - range_start).days + 1
+    buckets = [0.0] * span
+    labels = []
+    for i in range(span):
+        d = range_start + timedelta(days=i)
+        labels.append(d.strftime("%d %b"))
+    for row in rows or []:
+        pd = _parse_posting_date_value(row.get("posting_date"))
+        if not pd or pd < range_start or pd > range_end:
+            continue
+        idx = (pd - range_start).days
+        buckets[idx] += _as_number(row.get("grand_total"))
+    return [{"label": labels[i], "amount": round(buckets[i], 2)} for i in range(span)]
+
+
+def _cashflow_monthly_range(rows, range_start: date, range_end: date) -> list[dict]:
+    months: list[tuple[int, int]] = []
+    y, m = range_start.year, range_start.month
+    while (y, m) <= (range_end.year, range_end.month):
+        months.append((y, m))
+        m += 1
+        if m > 12:
+            m = 1
+            y += 1
+    labels = [calendar.month_abbr[m] for _y, m in months]
+    buckets = [0.0] * len(months)
+    month_index = {(yy, mm): i for i, (yy, mm) in enumerate(months)}
+    for row in rows or []:
+        pd = _parse_posting_date_value(row.get("posting_date"))
+        if not pd or pd < range_start or pd > range_end:
+            continue
+        key = (pd.year, pd.month)
+        if key in month_index:
+            buckets[month_index[key]] += _as_number(row.get("grand_total"))
+    return [{"label": labels[i], "amount": round(buckets[i], 2)} for i in range(len(months))]
+
+
+def _cashflow_custom_range(rows, range_start: date, range_end: date) -> list[dict]:
+    span = (range_end - range_start).days + 1
+    if span <= 7:
+        return _cashflow_daily_range(rows, range_start, range_end)
+    if span <= 31:
+        return _cashflow_month_week_segments(rows, range_start, range_end)
+    if range_start.year == range_end.year:
+        return _cashflow_year_months(rows, range_start.year, range_end)
+    return _cashflow_monthly_range(rows, range_start, range_end)
+
+
+def _resolve_dashboard_custom_bounds(from_raw, to_raw):
+    """Explicit from/to window and equal-length prior window for trend."""
+    fd = _safe_date(from_raw, lambda: None)
+    td = _safe_date(to_raw, lambda: None)
+    if not fd or not td:
+        frappe.throw("custom range requires from_date and to_date (YYYY-MM-DD)")
+    if fd > td:
+        fd, td = td, fd
+    span_days = (td - fd).days + 1
+    if span_days > 366:
+        frappe.throw("Custom date range cannot exceed 366 days")
+    prev_to = fd - timedelta(days=1)
+    prev_from = prev_to - timedelta(days=span_days - 1)
+    if fd.month == td.month and fd.year == td.year:
+        label = fd.strftime("%B %Y")
+    else:
+        label = f"{fd.strftime('%d %b %Y')} – {td.strftime('%d %b %Y')}"
+    return fd, td, prev_from, prev_to, label, "vs prior period"
+
+
 def _resolve_tenant_id(db) -> str:
     tenant_id = ""
     try:
@@ -1029,6 +1098,9 @@ def get_dashboard_summary(user, from_date=None, to_date=None):
 
     With ``GET ... ?period=week|month|year``: preset windows, trend vs prior window,
     cashflow buckets for charts, ``pct`` / ``color`` on breakdown rows.
+
+    Custom range: ``period=custom`` with ``from_date`` and ``to_date``, or both dates
+    without ``period``. Returns the same enriched payload (cashflow, trend, dates).
     """
     from flask import request
 
@@ -1042,9 +1114,18 @@ def get_dashboard_summary(user, from_date=None, to_date=None):
         period_preset = raw_period.strip().lower()
     else:
         period_preset = ""
-    if period_preset and period_preset not in ("week", "month", "year"):
-        frappe.throw("period must be one of: week, month, year")
+
+    from_raw = request.args.get("from_date") or from_date
+    to_raw = request.args.get("to_date") or to_date
+
+    if period_preset and period_preset not in ("week", "month", "year", "custom"):
+        frappe.throw("period must be one of: week, month, year, custom")
+
     use_preset = period_preset in ("week", "month", "year")
+    use_custom = period_preset == "custom" or (
+        not use_preset and from_raw and to_raw
+    )
+
     try:
         recent_limit = int(request.args.get("recent_limit") or 10)
     except (TypeError, ValueError):
@@ -1056,11 +1137,16 @@ def get_dashboard_summary(user, from_date=None, to_date=None):
         from_date, to_date, prev_from, prev_to, period_display, compare_label = (
             _resolve_dashboard_period(period_preset, today)
         )
+    elif use_custom:
+        from_date, to_date, prev_from, prev_to, period_display, compare_label = (
+            _resolve_dashboard_custom_bounds(from_raw, to_raw)
+        )
+        period_preset = "custom"
     else:
         prev_from = prev_to = None
         compare_label = None
         period_display = None
-        
+
         from_date = _safe_date(from_date, _default_from_date)
         to_date = _safe_date(to_date, _get_frappe_today)
 
@@ -1147,7 +1233,7 @@ def get_dashboard_summary(user, from_date=None, to_date=None):
         "recent_expenses": _recent_expenses_from_rows(recent_rows, recent_limit),
     }
 
-    if use_preset:
+    if use_preset or use_custom:
         prev_total = 0.0
         if prev_from and prev_to:
             prev_filters = _invoice_filters(company, prev_from, prev_to)
@@ -1173,8 +1259,10 @@ def get_dashboard_summary(user, from_date=None, to_date=None):
             cashflow = _cashflow_week_series(invoices, week_start)
         elif period_preset == "month":
             cashflow = _cashflow_month_week_segments(invoices, from_date, to_date)
-        else:
+        elif period_preset == "year":
             cashflow = _cashflow_year_months(invoices, from_date.year, to_date)
+        else:
+            cashflow = _cashflow_custom_range(invoices, from_date, to_date)
 
         cf_amounts = [b["amount"] for b in cashflow]
 
