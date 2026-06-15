@@ -3,6 +3,7 @@
   "bas": {
     "sales_g1": "Sales - TEIC",
     "account_1a": "GST Collected - TEIC",
-    "account_1b": "GST Paid - TEIC"
+    "account_1b": "GST Paid - TEIC",
+    "purchase_gst_template": "Non Capital (GST 10%) - _Test Expense Integ Co"
   }
 }

@@ -355,14 +355,40 @@ function expenseTestCompany(fixtureCompany) {
   return Cypress.env("EXPENSE_TEST_COMPANY") || fixtureCompany || "_Test Expense Integ Co";
 }
 
+function resolvePurchaseGstTemplate(company, bas) {
+  if (bas.purchase_gst_template) {
+    state.basAccounts = bas;
+    return;
+  }
+  const tplFilters = encodeURIComponent(
+    JSON.stringify([["company", "=", company], ["name", "like", "%GST%"]]),
+  );
+  cy.request({
+    method: "GET",
+    url: `${frappeBaseUrl()}/api/resource/Purchase%20Taxes%20and%20Charges%20Template?filters=${tplFilters}&fields=${encodeURIComponent(JSON.stringify(["name"]))}&limit_page_length=5`,
+    headers: sessionHeaders(),
+    failOnStatusCode: false,
+  }).then((tplRes) => {
+    let tplName = bas.purchase_gst_template || "";
+    if (tplRes.status === 200) {
+      const rows = (tplRes.body?.data || []).filter((r) => r.name && !/import/i.test(r.name));
+      const preferred = rows.find((r) => /non capital/i.test(r.name)) || rows[0];
+      if (preferred?.name) tplName = preferred.name;
+    }
+    expect(tplName, `purchase GST template for ${company}`).to.be.a("string").and.not.be.empty;
+    state.basAccounts = { ...bas, purchase_gst_template: tplName };
+    cy.log(`Resolved purchase GST template for ${company}: ${tplName}`);
+  });
+}
+
 function loadExpenseBasAccounts(fixture) {
   const company = expenseTestCompany(fixture?.company);
   const fixtureMatches =
     fixture?.company === company && fixture?.bas?.account_1b;
 
   if (fixtureMatches) {
-    state.basAccounts = fixture.bas;
     cy.log(`Using BAS fixture for ${company}`);
+    resolvePurchaseGstTemplate(company, { ...fixture.bas });
     return;
   }
 
@@ -387,23 +413,7 @@ function loadExpenseBasAccounts(fixture) {
       account_1b: basDoc.account_1b || "",
     };
     expect(bas.account_1b, "bas.account_1b from Frappe").to.be.a("string").and.not.be.empty;
-
-    const tplFilters = encodeURIComponent(
-      JSON.stringify([["company", "=", company], ["name", "like", "%GST%"]]),
-    );
-    cy.request({
-      method: "GET",
-      url: `${frappeBaseUrl()}/api/resource/Purchase%20Taxes%20and%20Charges%20Template?filters=${tplFilters}&fields=${encodeURIComponent(JSON.stringify(["name"]))}&limit_page_length=1`,
-      headers: sessionHeaders(),
-      failOnStatusCode: false,
-    }).then((tplRes) => {
-      if (tplRes.status === 200) {
-        const tplName = (tplRes.body?.data || [])[0]?.name;
-        if (tplName) bas.purchase_gst_template = tplName;
-      }
-      state.basAccounts = bas;
-      cy.log(`Resolved expense BAS for ${company}: ${JSON.stringify(bas)}`);
-    });
+    resolvePurchaseGstTemplate(company, bas);
   });
 }
 

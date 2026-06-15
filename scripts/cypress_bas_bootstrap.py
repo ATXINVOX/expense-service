@@ -176,6 +176,62 @@ def _g1_accounts_from_setup(company: str) -> list[str]:
     ) or []
 
 
+def find_purchase_gst_template(company: str) -> str:
+    """Match expense-service _find_gst_template() search patterns."""
+    if not frappe.db.table_exists("Purchase Taxes and Charges Template"):
+        return ""
+    for pattern in ("%Non Capital%GST%", "%Capital%GST%", "%GST%"):
+        rows = frappe.get_all(
+            "Purchase Taxes and Charges Template",
+            filters={"company": company, "name": ("like", pattern)},
+            fields=["name"],
+            limit=1,
+        )
+        if rows:
+            name = str(rows[0].get("name") or "")
+            if name and "import" not in name.lower():
+                return name
+    return ""
+
+
+def ensure_purchase_gst_template(company: str, gst_account_1b: str) -> str:
+    """Create purchase GST template when missing (required for expense BAS Cypress)."""
+    existing = find_purchase_gst_template(company)
+    if existing:
+        return existing
+    if not gst_account_1b or not frappe.db.exists("Account", gst_account_1b):
+        print(f"purchase GST template: missing account_1b for {company}")
+        return ""
+    if not frappe.db.table_exists("Purchase Taxes and Charges Template"):
+        return ""
+
+    template_name = f"Non Capital (GST 10%) - {company}"
+    if frappe.db.exists("Purchase Taxes and Charges Template", template_name):
+        return template_name
+
+    doc = frappe.get_doc(
+        {
+            "doctype": "Purchase Taxes and Charges Template",
+            "title": template_name,
+            "company": company,
+            "is_default": 1,
+            "taxes": [
+                {
+                    "charge_type": "On Net Total",
+                    "account_head": gst_account_1b,
+                    "description": "GST @ 10%",
+                    "rate": 10,
+                    "add_deduct_tax": "Add",
+                }
+            ],
+        }
+    )
+    doc.insert(ignore_permissions=True)
+    frappe.db.commit()
+    print(f"Created purchase GST template '{template_name}' for {company}")
+    return template_name
+
+
 def ensure_au_simpler_bas_report_setup(company: str, abbr: str) -> Dict[str, str]:
     """Create or patch AU Simpler BAS Report Setup for integration/Cypress."""
     accounts = ensure_invox_bas_accounts(company, abbr)
@@ -218,6 +274,9 @@ def ensure_au_simpler_bas_report_setup(company: str, abbr: str) -> Dict[str, str
         doc.insert(ignore_permissions=True)
 
     frappe.db.commit()
+    purchase_tpl = ensure_purchase_gst_template(company, accounts["account_1b"])
+    if purchase_tpl:
+        accounts["purchase_gst_template"] = purchase_tpl
     print(f"BAS bootstrap: setup ready for {company} -> {accounts}")
     return accounts
 
@@ -235,18 +294,9 @@ def write_bas_fixture(
         bas_payload["g1_accounts"] = g1_accounts
         if not bas_payload.get("sales_g1"):
             bas_payload["sales_g1"] = g1_accounts[0]
-    purchase_template = ""
-    if frappe.db.table_exists("Purchase Taxes and Charges Template"):
-        for pattern in ("%Non Capital%GST%", "%Capital%GST%", "%GST%"):
-            rows = frappe.get_all(
-                "Purchase Taxes and Charges Template",
-                filters={"company": company, "name": ("like", pattern)},
-                fields=["name"],
-                limit=1,
-            )
-            if rows:
-                purchase_template = str(rows[0].get("name") or "")
-                break
+    purchase_template = find_purchase_gst_template(company)
+    if not purchase_template and bas_payload.get("account_1b"):
+        purchase_template = ensure_purchase_gst_template(company, bas_payload["account_1b"])
     if purchase_template:
         bas_payload["purchase_gst_template"] = purchase_template
     payload: Dict[str, Any] = {
