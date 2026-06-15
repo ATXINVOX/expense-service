@@ -5,7 +5,7 @@
   "scripts": {
     "cy:open": "cypress open",
     "cy:run": "cypress run",
-    "cy:api": "cypress run --spec 'cypress/e2e/features/expense_submit/**/*.feature,cypress/e2e/features/expense_api/**/*.feature'"
+    "cy:api": "cypress run --spec 'cypress/e2e/features/expense_submit/**/*.feature,cypress/e2e/features/expense_api/**/*.feature,cypress/e2e/features/expense_custom_fields/**/*.feature'"
   },
   "devDependencies": {
     "@badeball/cypress-cucumber-preprocessor": "^20.0.0",

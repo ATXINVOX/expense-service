@@ -953,6 +953,7 @@ def _project_purchase_invoice_api(doc):
     return {
         "id": name,
         "name": name,
+        "company": d.get("company"),
         "supplier": d.get("supplier"),
         "posting_date": _fmt_api_date(d.get("posting_date")),
         "remarks": d.get("remarks"),
@@ -964,6 +965,9 @@ def _project_purchase_invoice_api(doc):
         "grand_total": _to_api_float(d.get("grand_total")),
         "currency": d.get("currency"),
         "receipt_image": getattr(doc, "receipt_image", None) or d.get("receipt_image"),
+        "expense_item_name": d.get("expense_item_name") or "",
+        "expense_item_group": d.get("expense_item_group") or "",
+        "expense_items_count": int(d.get("expense_items_count") or 0),
     }
 
 
@@ -1476,3 +1480,41 @@ def get_financial_dashboard(user):
             "quotation_list": "/api/resource/" + urllib.parse.quote("Quotation"),
         },
     }
+
+
+@get_app().secure_route(
+    "/api/method/expense_tracker.api.get_bas_summary",
+    methods=["GET"],
+)
+def get_bas_summary(user, from_date=None, to_date=None):
+    """AU Simpler BAS figures (G1, 1A, 1B, net GST) for the tenant company.
+
+    Query parameters:
+
+    - ``period`` or ``preset``: ``quarter`` (default), ``month``, or ``custom``
+    - ``from_date`` / ``to_date``: required when ``period=custom`` (YYYY-MM-DD)
+
+    Uses ERPNext Australian Localisation ``get_gst`` on an ``AU BAS Report`` for
+    the period. Requires ``AU Simpler BAS Report Setup`` (G1 / 1A / 1B accounts).
+    """
+    from flask import request
+
+    from expense_tracker.bas_summary import build_bas_summary
+
+    db = _app_db()
+    company = _resolve_company()
+    if not company:
+        frappe.throw("Company is required")
+
+    preset_q = request.args.get("period") or request.args.get("preset") or "quarter"
+    from_raw = request.args.get("from_date") or from_date
+    to_raw = request.args.get("to_date") or to_date
+
+    return build_bas_summary(
+        db,
+        company,
+        preset_q,
+        from_raw,
+        to_raw,
+        today=_get_frappe_today(),
+    )

@@ -5,6 +5,7 @@ import { Given, When, Then } from "@badeball/cypress-cucumber-preprocessor";
 const state = {
   lastResponse: null,
   storedInvoiceName: null,
+  customFieldsListFields: null,
   sid: null,
   csrfToken: null,
   authToken: null,
@@ -479,6 +480,77 @@ Given("I am logged in as a provisioned user", () => {
   cy.then(() => ensureExpenseAdministratorTenantContext());
 });
 
+Given("my company has a default chart of accounts", () => {
+  const company = expenseTestCompanyName();
+  const headers = sessionHeaders();
+  cy.request({
+    method: "GET",
+    url: `${frappeBaseUrl()}/api/resource/Company/${encodeURIComponent(company)}?fields=${encodeURIComponent(JSON.stringify(["name"]))}`,
+    headers,
+    failOnStatusCode: false,
+  }).then((res) => {
+    expect(res.status, `Company ${company}: ${JSON.stringify(res.body)}`).to.eq(200);
+  });
+  cy.request({
+    method: "POST",
+    url: `${frappeBaseUrl()}/api/method/frappe.client.get_list`,
+    headers,
+    body: {
+      doctype: "Account",
+      filters: [["company", "=", company], ["is_group", "=", 0]],
+      fields: ["name"],
+      limit_page_length: 1,
+    },
+    failOnStatusCode: false,
+  }).then((res) => {
+    expect(res.status, `Account list for ${company}: ${JSON.stringify(res.body)}`).to.eq(200);
+    const rows = res.body?.message || [];
+    expect(rows.length, `chart of accounts for ${company}`).to.be.greaterThan(0);
+    cy.log(`Chart of accounts OK for ${company}`);
+  });
+});
+
+function expenseTestCompanyName() {
+  return Cypress.env("EXPENSE_TEST_COMPANY") || "Acme Pty Ltd";
+}
+
+function parseCustomFieldsInvoiceTable(dataTable) {
+  const body = {};
+  for (const row of dataTable.hashes()) {
+    const key = row.field.trim();
+    const val = row.value.trim();
+    if (key === "items") {
+      body.items = JSON.parse(val);
+    } else {
+      body[key] = val;
+    }
+  }
+  if (!body.company) body.company = expenseTestCompanyName();
+  return body;
+}
+
+function captureCreatedPurchaseInvoiceName() {
+  const body = state.lastResponse?.body;
+  const name = getDocName(body);
+  if (name) {
+    state.storedInvoiceName = name;
+    cy.log(`Captured Purchase Invoice name: ${name}`);
+  }
+}
+
+function purchaseInvoiceDocFromResponse() {
+  const payload = responsePayload();
+  if (payload?.data && typeof payload.data === "object" && !Array.isArray(payload.data)) {
+    return payload.data;
+  }
+  return payload;
+}
+
+function postCustomFieldsPurchaseInvoice(body) {
+  postPurchaseInvoiceWithSession(body);
+  cy.then(() => captureCreatedPurchaseInvoiceName());
+}
+
 function _loginAsFrappeUser(user, pwd) {
   // Reuse an already acquired SID across scenarios in the same spec run.
   // This avoids hammering login endpoints and hitting gateway rate limits.
@@ -596,6 +668,55 @@ When("I POST a new Purchase Invoice with body:", (docString) => {
   postPurchaseInvoiceWithSession(body);
 });
 
+When("I create a Purchase Invoice with:", (dataTable) => {
+  postCustomFieldsPurchaseInvoice(parseCustomFieldsInvoiceTable(dataTable));
+});
+
+When("I create a Purchase Invoice with a new item {string} in group {string}", (itemName, itemGroup) => {
+  postCustomFieldsPurchaseInvoice({
+    company: expenseTestCompanyName(),
+    supplier: Cypress.env("EXPENSE_TEST_SUPPLIER") || "Cypress API Supplier",
+    posting_date: integrationPostingDate(),
+    items: [{ item_code: itemName, item_group: itemGroup, qty: 1, rate: 100 }],
+  });
+});
+
+When("I create a Purchase Invoice with no items", () => {
+  postCustomFieldsPurchaseInvoice({
+    company: expenseTestCompanyName(),
+    supplier: Cypress.env("EXPENSE_TEST_SUPPLIER") || "Cypress API Supplier",
+    posting_date: integrationPostingDate(),
+    items: [],
+  });
+});
+
+Given("I have created a Purchase Invoice with item {string} in group {string}", (itemName, itemGroup) => {
+  postCustomFieldsPurchaseInvoice({
+    company: expenseTestCompanyName(),
+    supplier: Cypress.env("EXPENSE_TEST_SUPPLIER") || "Cypress API Supplier",
+    posting_date: integrationPostingDate(),
+    items: [{ item_code: itemName, item_group: itemGroup, qty: 1, rate: 15 }],
+  });
+  cy.then(() => {
+    expect(state.lastResponse?.status, JSON.stringify(state.lastResponse?.body)).to.be.oneOf([200, 201]);
+    expect(state.storedInvoiceName, "created invoice name").to.be.a("string").and.not.be.empty;
+  });
+});
+
+When("I fetch Purchase Invoices via the resource API with fields:", (dataTable) => {
+  const fieldRows = dataTable.hashes().map((row) => String(row.field || "").trim()).filter(Boolean);
+  state.customFieldsListFields = fieldRows;
+  const fieldsParam = encodeURIComponent(JSON.stringify(fieldRows));
+  cy.request({
+    method: "GET",
+    url: `${serviceBaseUrl()}/api/resource/Purchase%20Invoice?fields=${fieldsParam}&limit_page_length=50&order_by=modified desc`,
+    headers: sessionHeaders(),
+    failOnStatusCode: false,
+  }).then((res) => {
+    state.lastResponse = res;
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Purchase Invoice: GET
 // ---------------------------------------------------------------------------
@@ -710,6 +831,22 @@ When("I GET the financial dashboard", () => {
 When("I GET the financial dashboard with query {string}", (queryString) => {
   const q = (queryString || "").trim();
   const base = `${serviceBaseUrl()}/api/method/expense_tracker.api.get_financial_dashboard`;
+  const url = q ? `${base}?${q}` : base;
+  cy.request({
+    method: "GET",
+    url,
+    headers: sessionHeaders(),
+    failOnStatusCode: false,
+  }).then((res) => { state.lastResponse = res; });
+});
+
+// ---------------------------------------------------------------------------
+// BAS summary (GST / BAS reporting)
+// ---------------------------------------------------------------------------
+
+When("I GET the BAS summary with query {string}", (queryString) => {
+  const q = (queryString || "").trim();
+  const base = `${serviceBaseUrl()}/api/method/expense_tracker.api.get_bas_summary`;
   const url = q ? `${base}?${q}` : base;
   cy.request({
     method: "GET",
@@ -2023,6 +2160,65 @@ Then("the expense API last response status should be one of {string}", (csv) => 
   ).to.be.oneOf(allowed);
 });
 
+Then("the response status should be {int}", (code) => {
+  const expected = parseInt(code, 10);
+  const actual = state.lastResponse?.status;
+  // Resource POST often returns 201; feature specs use 200 for generic success.
+  if (expected === 200 && (actual === 200 || actual === 201)) {
+    return;
+  }
+  expect(
+    actual,
+    `expected HTTP ${expected}, body=${JSON.stringify(state.lastResponse?.body)}`,
+  ).to.eq(expected);
+});
+
+function expectPurchaseInvoiceField(field, expectedRaw) {
+  const doc = purchaseInvoiceDocFromResponse();
+  const actual = doc?.[field];
+  if (field === "expense_items_count") {
+    expect(Number(actual)).to.eq(Number(expectedRaw));
+    return;
+  }
+  expect(String(actual ?? "")).to.eq(String(expectedRaw));
+}
+
+Then("the Purchase Invoice should have {string} as {string}", (field, expected) => {
+  expectPurchaseInvoiceField(field, expected);
+});
+
+Then("the Purchase Invoice should have {string} as {int}", (field, expected) => {
+  expectPurchaseInvoiceField(field, expected);
+});
+
+Then("each invoice in the response should have {string}", (field) => {
+  const rows = responsePayload()?.data || [];
+  expect(rows, "resource list should return data array").to.be.an("array");
+  const matchName = state.storedInvoiceName;
+  const targets = matchName ? rows.filter((r) => r.name === matchName) : rows;
+  expect(targets.length, `invoice list should include ${matchName || "rows"}`).to.be.greaterThan(0);
+  for (const row of targets) {
+    expect(row, `row ${row.name}`).to.have.property(field);
+    if (field === "expense_items_count") {
+      expect(Number(row[field])).to.be.a("number");
+    } else {
+      expect(row[field]).to.be.a("string");
+    }
+  }
+});
+
+Then("an Item named {string} should exist", (itemName) => {
+  cy.then(() => {
+    const doc = purchaseInvoiceDocFromResponse();
+    const itemCodes = (doc?.items || []).map((row) => row.item_code);
+    expect(itemCodes, `Purchase Invoice line items for ${state.storedInvoiceName}`).to.include(itemName);
+  });
+});
+
+Then("an Item Group named {string} should exist", (groupName) => {
+  expectPurchaseInvoiceField("expense_item_group", groupName);
+});
+
 Then("I store the created Purchase Invoice name from the response", () => {
   const payload = responsePayload();
   const name = payload?.name;
@@ -2120,6 +2316,18 @@ Then("each dashboard breakdown row should include pct and color", () => {
   for (const row of rows) {
     expect(row).to.include.keys("item_group", "total", "pct", "color");
   }
+});
+
+Then("the BAS summary response should include keys:", (dataTable) => {
+  const payload = responsePayload();
+  const rows = dataTable.raw().flat().map((v) => String(v).trim()).filter(Boolean);
+  for (const key of rows) {
+    expect(payload, `BAS summary payload should include '${key}'`).to.have.property(key);
+  }
+});
+
+Then("the BAS summary preset should be {string}", (preset) => {
+  expect(responsePayload().preset).to.eq(preset);
 });
 
 Then("the financial dashboard response should expose analytics fields", () => {

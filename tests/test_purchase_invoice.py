@@ -1472,6 +1472,7 @@ def test_project_purchase_invoice_api_coerces_types():
     doc = MagicMock()
     doc.as_dict.return_value = {
         "name": "ACC-PINV-1",
+        "company": "Acme Pty Ltd",
         "supplier": "aavin",
         "posting_date": date(2026, 4, 8),
         "remarks": "Grocery",
@@ -1488,12 +1489,18 @@ def test_project_purchase_invoice_api_coerces_types():
         "docstatus": 0,
         "grand_total": 13.5,
         "currency": "AUD",
+        "expense_item_name": "Milk 2L",
+        "expense_item_group": "Groceries",
+        "expense_items_count": 1,
     }
     out = _project_purchase_invoice_api(doc)
     assert out["id"] == "ACC-PINV-1"
     assert out["posting_date"] == "2026-04-08"
     assert out["items"][0]["qty"] == 3.0
     assert out["grand_total"] == 13.5
+    assert out["expense_item_name"] == "Milk 2L"
+    assert out["expense_item_group"] == "Groceries"
+    assert out["expense_items_count"] == 1
 
 
 def test_get_purchase_invoice_returns_slim_json():

@@ -10,8 +10,14 @@ Feature: Expense custom fields on Purchase Invoice
   lives in expense_submit/expense_draft_submit.feature (step definitions in
   cypress/support/step_definitions/expense_api_steps.js).
 
-  The scenarios below are specification placeholders; wire them to Cypress steps
-  or run pytest tests/test_purchase_invoice.py for TDD coverage.
+  The scenarios below exercise custom fields via the expense-service resource API.
+  Run with: npm run cy:api (or cypress run --spec cypress/e2e/features/expense_custom_fields/**/*.feature)
+
+  Environment (Cypress env or shell):
+    EXPENSE_SERVICE_URL  — default http://localhost:9004
+    EXPENSE_FRAPPE_URL   — Frappe login endpoint (default http://localhost:8000)
+    EXPENSE_TEST_COMPANY — company name injected into each POST body
+    ADMIN_PASSWORD       — Administrator password (default "admin")
 
   Background:
     Given I am logged in as a provisioned user
