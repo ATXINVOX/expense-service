@@ -628,7 +628,18 @@ def _find_gst_template(company: str | None = None):
     return None
 
 
-def _gst_template_rows(company: str, template_name: str = DEFAULT_GST_TEMPLATE) -> List[Dict[str, Any]]:
+def _gst_template_rows(
+    company: str,
+    template_name: str = DEFAULT_GST_TEMPLATE,
+    *,
+    gst_inclusive: bool = True,
+) -> List[Dict[str, Any]]:
+    """Build purchase GST tax rows for mobile expenses.
+
+    When ``gst_inclusive`` is True (default), line ``rate`` is treated as a GST-inclusive
+    bill total (e.g. user enters 100 → ~90.91 net + ~9.09 GST → grand total 100).
+    When False, ERPNext adds GST on top of the net rate (100 → 110).
+    """
     template_rows = frappe.get_all(
         "Purchase Taxes and Charges",
         filters={"parent": template_name},
@@ -677,6 +688,9 @@ def _gst_template_rows(company: str, template_name: str = DEFAULT_GST_TEMPLATE) 
             account_base = account_head.rsplit(" - ", 1)[0]
             account_head = f"{account_base} - {abbr}"
 
+        included = int(bool(_value(row, "included_in_print_rate", 0)))
+        if gst_inclusive:
+            included = 1
         rows.append(
             {
                 "charge_type": _value(row, "charge_type", "On Net Total"),
@@ -684,7 +698,7 @@ def _gst_template_rows(company: str, template_name: str = DEFAULT_GST_TEMPLATE) 
                 "description": _value(row, "description", DEFAULT_GST_TEMPLATE),
                 "rate": _value(row, "rate"),
                 "cost_center": _value(row, "cost_center", cost_center),
-                "included_in_print_rate": int(bool(_value(row, "included_in_print_rate", 0))),
+                "included_in_print_rate": included,
                 "add_deduct_tax": _value(row, "add_deduct_tax", "Add"),
             }
         )
@@ -1274,7 +1288,10 @@ class PurchaseInvoice(DocumentController):
             if gst_template:
                 _set_value(self, "taxes_and_charges", gst_template)
                 self.set("taxes", [])
-                for row in manual_taxes + _gst_template_rows(company, gst_template):
+                # Mobile UX: user-entered line rate is GST-inclusive when GST is on.
+                for row in manual_taxes + _gst_template_rows(
+                    company, gst_template, gst_inclusive=True
+                ):
                     self.append("taxes", row)
                 logger.debug("before_validate: GST template=%s applied", gst_template)
             else:

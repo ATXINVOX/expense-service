@@ -233,6 +233,28 @@ def test_purchase_invoice_before_validate_sets_default_accounts_and_taxes():
     assert len(doc.taxes) == 1
     assert doc.taxes[0]["description"] == GST_TEMPLATE_NAME
     assert doc.taxes_and_charges == GST_TEMPLATE_NAME
+    assert doc.taxes[0]["included_in_print_rate"] == 1
+
+
+def test_purchase_invoice_gst_off_leaves_amount_without_tax_rows():
+    """Non-GST expenses: no template, no GST rows; line rate is unchanged."""
+    mock_frappe.db.get_value.side_effect = _default_get_value
+    mock_frappe.get_all.side_effect = _default_get_all
+
+    doc = PurchaseInvoice(
+        {
+            "doctype": "Purchase Invoice",
+            "company": "Acme Pty Ltd",
+            "taxes_and_charges": "",
+            "items": [{"item_code": "Fuel", "rate": 90.0}],
+        }
+    )
+
+    doc.before_validate()
+
+    assert doc.taxes_and_charges == ""
+    assert doc.taxes == []
+    assert doc.items[0]["rate"] == 90.0
 
 
 def test_purchase_invoice_uses_bas_account_1b_for_gst():
@@ -261,6 +283,7 @@ def test_purchase_invoice_uses_bas_account_1b_for_gst():
 
     assert len(doc.taxes) == 1
     assert doc.taxes[0]["account_head"] == "GST Paid BAS - AC"
+    assert doc.taxes[0]["included_in_print_rate"] == 1
     mock_frappe.db.get_value.side_effect = _default_get_value
     mock_frappe.get_all.side_effect = _default_get_all
 
