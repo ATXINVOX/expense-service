@@ -1,59 +1,16 @@
 from datetime import date
-from pathlib import Path
-from types import ModuleType
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 import sys
 
 import pytest
 
+# Initialise frappe / microservice stubs via test_purchase_invoice first so
+# expense_tracker.api binds get_app() to the same tenant_db mock used elsewhere.
+import tests.test_purchase_invoice as pi_test_env
 
-ROOT = Path(__file__).resolve().parent.parent
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
-
-mock_frappe = MagicMock()
-mock_frappe.whitelist = lambda *args, **kwargs: (lambda fn: fn)
-mock_frappe.ValidationError = type("ValidationError", (Exception,), {})
-
-mock_app = MagicMock()
-mock_app.db = MagicMock()
-mock_app.tenant_db = mock_app.db
-
-mock_microservice = MagicMock()
-mock_microservice_controller = MagicMock()
-mock_microservice.get_app.return_value = mock_app
-
-
-def mock_secure_route(rule, **options):
-    def decorator(f):
-        return f
-
-    return decorator
-
-
-mock_app.secure_route.side_effect = mock_secure_route
-
-sys.modules["frappe"] = mock_frappe
-sys.modules["frappe_microservice"] = mock_microservice
-sys.modules["frappe_microservice.controller"] = mock_microservice_controller
-
-if "flask" not in sys.modules:
-    _flask_stub = ModuleType("flask")
-    _flask_stub.request = MagicMock()
-    sys.modules["flask"] = _flask_stub
-
-
-def _configure_frappe_throw():
-    def _throw(msg, exc=Exception):
-        if isinstance(exc, type) and issubclass(exc, Exception):
-            raise exc(msg)
-        raise Exception(msg)
-
-    mock_frappe.throw.side_effect = _throw
-
-
-_configure_frappe_throw()
+mock_frappe = pi_test_env.mock_frappe
+mock_app = pi_test_env.mock_app
+_EmptyRequestArgs = pi_test_env._EmptyRequestArgs
 
 from expense_tracker.api import get_bas_report, get_bas_summary, _app_db  # noqa: E402
 from expense_tracker.bas_summary import (  # noqa: E402
@@ -82,8 +39,12 @@ class _FakeDoc(dict):
 @pytest.fixture(autouse=True)
 def reset_mocks():
     mock_app.db.reset_mock()
+    mock_app.db.get_all.side_effect = None
+    mock_app.db.get_value.side_effect = None
+    mock_app.db.exists.return_value = False
     mock_app.tenant_db.reset_mock()
     mock_frappe.db.reset_mock()
+    mock_frappe.db.has_column = MagicMock(return_value=True)
     mock_frappe.get_all.reset_mock()
     mock_frappe.get_all.side_effect = None
     mock_frappe.get_all.return_value = []
@@ -94,11 +55,15 @@ def reset_mocks():
     mock_frappe.db.get_value.return_value = None
     mock_frappe.db.commit.reset_mock()
     mock_frappe.get_attr.reset_mock()
+    mock_frappe.get_attr.side_effect = pi_test_env._frappe_get_attr_side_effect
     mock_frappe.defaults = MagicMock()
     mock_frappe.defaults.get_user_default.return_value = "Acme Pty Ltd"
-    if hasattr(sys.modules["flask"], "request"):
+    mock_app.tenant_db.get_all.side_effect = lambda *args, **kwargs: mock_frappe.get_all(*args, **kwargs)
+    mock_app.tenant_db.get_value.side_effect = lambda *args, **kwargs: mock_frappe.db.get_value(*args, **kwargs)
+    mock_app.tenant_db.get_tenant_id.return_value = "test-tenant-001"
+    if "flask" in sys.modules and hasattr(sys.modules["flask"], "request"):
         sys.modules["flask"].request.reset_mock()
-        sys.modules["flask"].request.args = {}
+        sys.modules["flask"].request.args = _EmptyRequestArgs()
 
 
 def test_resolve_bas_period_quarter():
@@ -194,10 +159,13 @@ def test_serialize_bas_summary_maps_labels():
 
 
 def test_build_bas_summary_calls_get_gst_and_returns_payload():
-    mock_frappe.db.get_value.return_value = {
-        "account_1a": "GST Collected - A",
-        "account_1b": "GST Paid - A",
-    }
+    mock_frappe.db.get_value.side_effect = lambda doctype, filters, field=None, **kw: (
+        {"account_1a": "GST Collected - A", "account_1b": "GST Paid - A"}
+        if doctype == "AU Simpler BAS Report Setup"
+        else "AUD"
+        if doctype == "Company"
+        else None
+    )
     mock_frappe.db.table_exists.return_value = True
     mock_frappe.get_all.side_effect = [
         ["Sales - A"],
@@ -211,8 +179,11 @@ def test_build_bas_summary_calls_get_gst_and_returns_payload():
     )
     mock_frappe.get_doc.return_value = refreshed
     get_gst = MagicMock()
-    mock_frappe.get_attr.return_value = get_gst
-    mock_app.db.get_value.return_value = "AUD"
+    mock_frappe.get_attr.side_effect = (
+        lambda path: get_gst
+        if path.endswith("get_gst")
+        else pi_test_env._frappe_get_attr_side_effect(path)
+    )
 
     result = build_bas_summary(
         mock_app.db,
