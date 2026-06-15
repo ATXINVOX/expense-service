@@ -243,6 +243,11 @@ jobs:
           frappe.destroy()
           PYEOF
 
+      - name: Bootstrap AU Simpler BAS Report Setup for Cypress
+        run: |
+          docker compose -f docker-compose.integration.yml exec -T dev-central-site \
+            /home/frappe/frappe-bench/env/bin/python /mnt/expense/scripts/integration_bootstrap.py
+
       - name: Start expense-service HTTP server on port 9004
         run: |
           BENCH="/home/frappe/frappe-bench"

@@ -235,7 +235,32 @@ def test_purchase_invoice_before_validate_sets_default_accounts_and_taxes():
     assert doc.taxes_and_charges == GST_TEMPLATE_NAME
 
 
-def test_purchase_invoice_without_gst_keeps_non_gst_taxes():
+def test_purchase_invoice_uses_bas_account_1b_for_gst():
+    """GST tax rows post to account_1b from AU Simpler BAS Report Setup."""
+    mock_frappe.db.table_exists = MagicMock(return_value=True)
+
+    def _gv(doctype, filters=None, field=None, *args, **kwargs):
+        if doctype == "AU Simpler BAS Report Setup" and filters == "Acme Pty Ltd":
+            if isinstance(field, (list, tuple)):
+                return {"account_1a": "GST Collected - AC", "account_1b": "GST Paid BAS - AC"}
+        return _default_get_value(doctype, filters, field)
+
+    mock_frappe.db.get_value.side_effect = _gv
+    mock_frappe.get_all.side_effect = _default_get_all
+
+    doc = PurchaseInvoice(
+        {
+            "doctype": "Purchase Invoice",
+            "company": "Acme Pty Ltd",
+            "taxes_and_charges": "AU GST 10%",
+            "items": [{"item_code": "Fuel", "expense_account": None, "rate": 100.0}],
+        }
+    )
+
+    doc.before_validate()
+
+    assert len(doc.taxes) == 1
+    assert doc.taxes[0]["account_head"] == "GST Paid BAS - AC"
     mock_frappe.db.get_value.side_effect = _default_get_value
     mock_frappe.get_all.side_effect = _default_get_all
 

@@ -937,6 +937,18 @@ def _project_purchase_invoice_api(doc):
                 "amount": _to_api_float(row.get("amount")),
             }
         )
+    taxes_out = []
+    for row in d.get("taxes") or []:
+        if not row:
+            continue
+        taxes_out.append(
+            {
+                "account_head": row.get("account_head"),
+                "description": row.get("description"),
+                "rate": _to_api_float(row.get("rate")),
+                "tax_amount": _to_api_float(row.get("tax_amount")),
+            }
+        )
     name = d.get("name")
     return {
         "id": name,
@@ -945,6 +957,8 @@ def _project_purchase_invoice_api(doc):
         "posting_date": _fmt_api_date(d.get("posting_date")),
         "remarks": d.get("remarks"),
         "items": items_out,
+        "taxes_and_charges": d.get("taxes_and_charges"),
+        "taxes": taxes_out,
         "status": d.get("status"),
         "docstatus": d.get("docstatus"),
         "grand_total": _to_api_float(d.get("grand_total")),

@@ -559,6 +559,50 @@ def _ensure_default_payable_account(company: str):
     # Note: We don't set it on company here, as the NEXT save/validate will find it
 
 
+def _get_au_simpler_bas_accounts(company: str) -> Dict[str, Any]:
+    """Read G1 income accounts and 1A/1B GST accounts from AU Simpler BAS Report Setup."""
+    empty: Dict[str, Any] = {"income_accounts": [], "account_1a": "", "account_1b": ""}
+    if not company:
+        return empty
+    try:
+        if not frappe.db.table_exists("AU Simpler BAS Report Setup"):
+            return empty
+    except Exception:
+        return empty
+    try:
+        row = frappe.db.get_value(
+            "AU Simpler BAS Report Setup",
+            company,
+            ["account_1a", "account_1b"],
+            as_dict=True,
+        )
+    except Exception as exc:
+        logger.debug("_get_au_simpler_bas_accounts setup: %s", exc)
+        row = None
+    account_1a = _as_plain_str((row or {}).get("account_1a"))
+    account_1b = _as_plain_str((row or {}).get("account_1b"))
+    income_accounts: List[str] = []
+    try:
+        if frappe.db.table_exists("Income Account for Simpler BAS"):
+            raw = frappe.get_all(
+                "Income Account for Simpler BAS",
+                filters={
+                    "parent": company,
+                    "parenttype": "AU Simpler BAS Report Setup",
+                    "parentfield": "accounts_g1",
+                },
+                pluck="account",
+            )
+            income_accounts = [_as_plain_str(a) for a in (raw or []) if _as_plain_str(a)]
+    except Exception as exc:
+        logger.debug("_get_au_simpler_bas_accounts g1: %s", exc)
+    return {
+        "income_accounts": income_accounts,
+        "account_1a": account_1a,
+        "account_1b": account_1b,
+    }
+
+
 def _find_gst_template(company: str | None = None):
     """Return the GST purchase tax template for the given company.
 
@@ -600,29 +644,36 @@ def _gst_template_rows(company: str, template_name: str = DEFAULT_GST_TEMPLATE) 
         order_by="idx asc",
     )
     if not template_rows:
-        template_rows = frappe.get_all(
-            "Purchase Taxes and Charges Template Detail",
-            filters={"parent": template_name},
-            fields=[
-                "charge_type",
-                "account_head",
-                "description",
-                "rate",
-                "cost_center",
-                "included_in_print_rate",
-                "add_deduct_tax",
-            ],
-            order_by="idx asc",
-        )
+        try:
+            if frappe.db.table_exists("Purchase Taxes and Charges Template Detail"):
+                template_rows = frappe.get_all(
+                    "Purchase Taxes and Charges Template Detail",
+                    filters={"parent": template_name},
+                    fields=[
+                        "charge_type",
+                        "account_head",
+                        "description",
+                        "rate",
+                        "cost_center",
+                        "included_in_print_rate",
+                        "add_deduct_tax",
+                    ],
+                    order_by="idx asc",
+                )
+        except Exception:
+            template_rows = []
     if not template_rows:
         return []
 
     abbr = _company_abbr(company)
     cost_center = _get_default_cost_center(company)
+    bas_gst_purchase = _as_plain_str(_get_au_simpler_bas_accounts(company).get("account_1b"))
     rows = []
     for row in template_rows or []:
         account_head = _value(row, "account_head", "")
-        if account_head and " - " in account_head:
+        if bas_gst_purchase:
+            account_head = bas_gst_purchase
+        elif account_head and " - " in account_head:
             account_base = account_head.rsplit(" - ", 1)[0]
             account_head = f"{account_base} - {abbr}"
 

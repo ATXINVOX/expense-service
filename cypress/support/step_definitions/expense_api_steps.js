@@ -12,6 +12,7 @@ const state = {
   dashboardPresetOverride: null,
   loggedInUser: null,
   userTenantId: null,
+  basAccounts: null,
 };
 
 function serviceBaseUrl() {
@@ -60,8 +61,15 @@ function gatewayBaseUrl() {
 function gatewayExtraHeaders() {
   const headers = {};
   const base = frappeBaseUrl();
-  if (/localhost:9080|:9080\b/.test(base) || Cypress.env("FRAPPE_SITE_HOST")) {
-    headers.Host = Cypress.env("FRAPPE_SITE_HOST") || "dev.localhost";
+  try {
+    const host = new URL(base).host;
+    if (host.startsWith("localhost:") || host.startsWith("127.0.0.1:") || /:9080\b/.test(base)) {
+      headers.Host = Cypress.env("FRAPPE_SITE_HOST") || "dev.localhost";
+    }
+  } catch (_e) {
+    if (Cypress.env("FRAPPE_SITE_HOST")) {
+      headers.Host = Cypress.env("FRAPPE_SITE_HOST");
+    }
   }
   return headers;
 }
@@ -85,13 +93,13 @@ function expenseTestTenantId() {
   );
 }
 
-/** Ensure Administrator has a non-SYSTEM tenant_id (required by expense-service). */
+/** Ensure Administrator has tenant_id aligned with the test company (required by expense-service). */
 function ensureExpenseAdministratorTenantContext() {
   if (!state.sid) return cy.wrap(null);
 
-  const tenantId = expenseTestTenantId();
   const headers = sessionHeaders();
   const apiBase = frappeBaseUrl();
+  const company = Cypress.env("EXPENSE_TEST_COMPANY") || "_Test Expense Integ Co";
 
   const probeExpense = () =>
     cy.request({
@@ -101,6 +109,34 @@ function ensureExpenseAdministratorTenantContext() {
       failOnStatusCode: false,
     });
 
+  const syncTenantFromCompany = () =>
+    cy
+      .request({
+        method: "GET",
+        url: `${apiBase}/api/resource/Company/${encodeURIComponent(company)}?fields=${encodeURIComponent(JSON.stringify(["name", "tenant_id"]))}`,
+        headers,
+        failOnStatusCode: false,
+      })
+      .then((coRes) => {
+        const tenantId =
+          coRes.body?.data?.tenant_id ||
+          coRes.body?.tenant_id ||
+          expenseTestTenantId();
+        if (!tenantId) return cy.wrap(null);
+        return cy.request({
+          method: "POST",
+          url: `${apiBase}/api/method/frappe.client.set_value`,
+          headers,
+          body: {
+            doctype: "User",
+            name: "Administrator",
+            fieldname: "tenant_id",
+            value: String(tenantId),
+          },
+          failOnStatusCode: false,
+        });
+      });
+
   return probeExpense().then((probeRes) => {
     const msg = String(probeRes.body?.message || "");
     const tenantMissing = probeRes.status === 400 && /No tenant_id/i.test(msg);
@@ -108,28 +144,10 @@ function ensureExpenseAdministratorTenantContext() {
       return;
     }
 
-    cy.log(`Bootstrapping Administrator tenant_id=${tenantId} via ${apiBase}`);
-    return cy
-      .request({
-        method: "POST",
-        url: `${apiBase}/api/method/frappe.client.set_value`,
-        headers,
-        body: {
-          doctype: "User",
-          name: "Administrator",
-          fieldname: "tenant_id",
-          value: tenantId,
-        },
-        failOnStatusCode: false,
-      })
-      .then((setRes) => {
-        if (setRes.status !== 200) {
-          cy.log(
-            `frappe.client.set_value tenant_id: HTTP ${setRes.status} ${JSON.stringify(setRes.body)}`,
-          );
-        }
-        const company = Cypress.env("EXPENSE_TEST_COMPANY") || "_Test Expense Integ Co";
-        return cy.request({
+    cy.log(`Bootstrapping Administrator tenant for company=${company}`);
+    return syncTenantFromCompany()
+      .then(() =>
+        cy.request({
           method: "POST",
           url: `${apiBase}/api/method/frappe.client.set_value`,
           headers,
@@ -140,15 +158,15 @@ function ensureExpenseAdministratorTenantContext() {
             value: company,
           },
           failOnStatusCode: false,
-        });
-      })
+        }),
+      )
       .then(() => probeExpense())
       .then((verifyRes) => {
         if (verifyRes.status !== 200) {
           cy.log(
             `After tenant bootstrap, expense dashboard still HTTP ${verifyRes.status}: ${JSON.stringify(
               verifyRes.body,
-            )}. Run: ./scripts/bootstrap_dev_cypress.sh`,
+            )}`,
           );
         }
       });
@@ -327,6 +345,90 @@ function postPurchaseInvoiceWithSession(body) {
   });
 }
 
+function isGstTaxRow(row) {
+  const desc = String(row?.description || "").toLowerCase();
+  const head = String(row?.account_head || "").toLowerCase();
+  return desc.includes("gst") || head.includes("gst");
+}
+
+function expenseTestCompany(fixtureCompany) {
+  return Cypress.env("EXPENSE_TEST_COMPANY") || fixtureCompany || "_Test Expense Integ Co";
+}
+
+function loadExpenseBasAccounts(fixture) {
+  const company = expenseTestCompany(fixture?.company);
+  const fixtureMatches =
+    fixture?.company === company && fixture?.bas?.account_1b;
+
+  if (fixtureMatches) {
+    state.basAccounts = fixture.bas;
+    cy.log(`Using BAS fixture for ${company}`);
+    return;
+  }
+
+  cy.log(`Fixture is for ${fixture?.company || "?"}; resolving BAS accounts from Frappe for ${company}`);
+
+  cy.request({
+    method: "GET",
+    url: `${frappeBaseUrl()}/api/resource/AU%20Simpler%20BAS%20Report%20Setup/${encodeURIComponent(company)}`,
+    headers: sessionHeaders(),
+    failOnStatusCode: false,
+  }).then((basRes) => {
+    expect(
+      basRes.status,
+      `AU Simpler BAS Report Setup for ${company}: ${JSON.stringify(basRes.body)}`,
+    ).to.eq(200);
+    const basDoc = basRes.body?.data || basRes.body;
+    const g1Accounts = (basDoc.accounts_g1 || []).map((row) => row.account).filter(Boolean);
+    const bas = {
+      sales_g1: g1Accounts[0] || "",
+      g1_accounts: g1Accounts,
+      account_1a: basDoc.account_1a || "",
+      account_1b: basDoc.account_1b || "",
+    };
+    expect(bas.account_1b, "bas.account_1b from Frappe").to.be.a("string").and.not.be.empty;
+
+    const tplFilters = encodeURIComponent(
+      JSON.stringify([["company", "=", company], ["name", "like", "%GST%"]]),
+    );
+    cy.request({
+      method: "GET",
+      url: `${frappeBaseUrl()}/api/resource/Purchase%20Taxes%20and%20Charges%20Template?filters=${tplFilters}&fields=${encodeURIComponent(JSON.stringify(["name"]))}&limit_page_length=1`,
+      headers: sessionHeaders(),
+      failOnStatusCode: false,
+    }).then((tplRes) => {
+      if (tplRes.status === 200) {
+        const tplName = (tplRes.body?.data || [])[0]?.name;
+        if (tplName) bas.purchase_gst_template = tplName;
+      }
+      state.basAccounts = bas;
+      cy.log(`Resolved expense BAS for ${company}: ${JSON.stringify(bas)}`);
+    });
+  });
+}
+
+Given("AU Simpler BAS Report Setup accounts are available for expenses", () => {
+  cy.fixture("resolved_pi_bas_accounts").then((acc) => loadExpenseBasAccounts(acc));
+});
+
+When("I POST a new Purchase Invoice with BAS enrichment and body:", (docString) => {
+  const body = JSON.parse(docString.trim());
+  const company = Cypress.env("EXPENSE_TEST_COMPANY") || "Acme Pty Ltd";
+  if (!body.company) body.company = company;
+  const testSupplier = Cypress.env("EXPENSE_TEST_SUPPLIER");
+  if (testSupplier) body.supplier = testSupplier;
+  if (body.items?.length) {
+    const testItem = Cypress.env("EXPENSE_TEST_ITEM");
+    if (testItem) body.items[0].item_code = testItem;
+  }
+  if (body.taxes_and_charges) {
+    const gstTemplate =
+      Cypress.env("EXPENSE_TEST_GST_TEMPLATE") || state.basAccounts?.purchase_gst_template;
+    if (gstTemplate) body.taxes_and_charges = gstTemplate;
+  }
+  postPurchaseInvoiceWithSession(body);
+});
+
 // ---------------------------------------------------------------------------
 // Auth: login via Frappe session API and export SID
 // ---------------------------------------------------------------------------
@@ -496,6 +598,21 @@ When("I GET the stored Purchase Invoice", () => {
     headers: sessionHeaders(),
     failOnStatusCode: false,
   }).then((res) => { state.lastResponse = res; });
+});
+
+When("I GET the stored Purchase Invoice with tax rows", () => {
+  cy.request({
+    method: "POST",
+    url: `${serviceBaseUrl()}/api/method/frappe.client.get`,
+    headers: sessionHeaders(),
+    body: { doctype: "Purchase Invoice", name: state.storedInvoiceName },
+    failOnStatusCode: false,
+  }).then((res) => {
+    state.lastResponse = {
+      ...res,
+      body: { data: res.body?.message || res.body?.data || res.body },
+    };
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1910,6 +2027,22 @@ Then("the stored invoice should have docstatus {int}", (ds) => {
 
 Then("the stored invoice should have workflow status {string}", (st) => {
   expect(responsePayload().status).to.eq(st);
+});
+
+Then("the stored purchase invoice GST tax account should match BAS 1B", () => {
+  expect(state.basAccounts?.account_1b, "BAS 1B account").to.be.a("string").and.not.be.empty;
+  const body = responsePayload();
+  const taxes = (body.taxes || []).filter(isGstTaxRow);
+  expect(taxes.length, `GST tax rows in ${JSON.stringify(body.taxes)}`).to.be.greaterThan(0);
+  expect(taxes[0].account_head).to.eq(state.basAccounts.account_1b);
+});
+
+Then("the created purchase invoice GST tax account should match BAS 1B", () => {
+  expect(state.basAccounts?.account_1b, "BAS 1B account").to.be.a("string").and.not.be.empty;
+  const body = responsePayload();
+  const taxes = (body.taxes || []).filter(isGstTaxRow);
+  expect(taxes.length, `GST tax rows in ${JSON.stringify(body.taxes)}`).to.be.greaterThan(0);
+  expect(taxes[0].account_head).to.eq(state.basAccounts.account_1b);
 });
 
 Then("the submit response should show success and status Submitted", () => {

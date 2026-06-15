@@ -1,0 +1,8 @@
+{
+  "company": "_Test Expense Integ Co",
+  "bas": {
+    "sales_g1": "Sales - TEIC",
+    "account_1a": "GST Collected - TEIC",
+    "account_1b": "GST Paid - TEIC"
+  }
+}

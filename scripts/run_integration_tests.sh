@@ -164,6 +164,10 @@ print(f"  Administrator default company = {TEST_COMPANY}")
 frappe.destroy()
 PYEOF
 
+log "Bootstrapping AU Simpler BAS Report Setup for Cypress"
+$COMPOSE -f "$COMPOSE_FILE" exec -T "$SERVICE" \
+    "$PYTHON" /mnt/expense/scripts/integration_bootstrap.py
+
 # ---------------------------------------------------------------------------
 # 6. Start expense-service HTTP server on port 9004 (inside the container)
 # ---------------------------------------------------------------------------

@@ -8,7 +8,16 @@ Seeds Administrator tenant_id, default company, and test company for Cypress.
 
 from __future__ import annotations
 
+import pathlib
+import sys
+
 import frappe
+
+SCRIPTS_DIR = pathlib.Path(__file__).resolve().parent
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+from cypress_bas_bootstrap import ensure_au_simpler_bas_report_setup, write_bas_fixture
 
 BENCH_SITES = "/home/frappe/frappe-bench/sites"
 TEST_COMPANY = "_Test Expense Integ Co"
@@ -135,6 +144,13 @@ def main() -> None:
         "UPDATE `tabCost Center` SET tenant_id = %s WHERE company = %s",
         (TEST_TENANT_ID, TEST_COMPANY),
     )
+
+    bas = ensure_au_simpler_bas_report_setup(TEST_COMPANY, TEST_ABBR)
+    fixture_path = pathlib.Path(__file__).resolve().parent.parent / "cypress/fixtures/resolved_pi_bas_accounts.json"
+    container_fixture = pathlib.Path("/mnt/expense/cypress/fixtures/resolved_pi_bas_accounts.json")
+    if container_fixture.parent.is_dir():
+        fixture_path = container_fixture
+    write_bas_fixture(fixture_path, company=TEST_COMPANY, bas=bas)
 
     frappe.db.commit()
     print(f"Administrator.tenant_id = {TEST_TENANT_ID}")
