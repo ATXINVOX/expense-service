@@ -1518,3 +1518,41 @@ def get_bas_summary(user, from_date=None, to_date=None):
         to_raw,
         today=_get_frappe_today(),
     )
+
+
+@get_app().secure_route(
+    "/api/method/expense_tracker.api.get_bas_report",
+    methods=["GET"],
+)
+def get_bas_report(user, from_date=None, to_date=None):
+    """AU BAS report for the mobile BAS screen (sales, purchases, net GST, alerts).
+
+    Query parameters:
+
+    - ``period`` or ``preset``: ``quarter`` (default), ``month``, or ``custom``
+    - ``from_date`` / ``to_date``: required when ``period=custom`` (YYYY-MM-DD)
+
+    Returns grouped sections (``sales``, ``purchases``, ``summary``, ``alerts``)
+    plus flat BAS codes (``g1``, ``g2``, ``g11``, ``gst_collected_1a``, etc.).
+    """
+    from flask import request
+
+    from expense_tracker.bas_summary import build_bas_report
+
+    db = _app_db()
+    company = _resolve_company()
+    if not company:
+        frappe.throw("Company is required")
+
+    preset_q = request.args.get("period") or request.args.get("preset") or "quarter"
+    from_raw = request.args.get("from_date") or from_date
+    to_raw = request.args.get("to_date") or to_date
+
+    return build_bas_report(
+        db,
+        company,
+        preset_q,
+        from_raw,
+        to_raw,
+        today=_get_frappe_today(),
+    )

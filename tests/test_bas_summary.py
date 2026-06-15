@@ -55,13 +55,16 @@ def _configure_frappe_throw():
 
 _configure_frappe_throw()
 
-from expense_tracker.api import get_bas_summary, _app_db  # noqa: E402
+from expense_tracker.api import get_bas_report, get_bas_summary, _app_db  # noqa: E402
 from expense_tracker.bas_summary import (  # noqa: E402
+    build_bas_report,
     build_bas_summary,
     compute_simpler_bas_from_gl,
+    count_flagged_gst_transactions,
     ensure_bas_accounts_configured,
     find_or_create_bas_report,
     resolve_bas_period,
+    serialize_bas_report,
     serialize_bas_summary,
 )
 
@@ -305,3 +308,114 @@ def test_get_bas_summary_http_handler_uses_company_default():
     assert result["g1"] == 250.0
     assert result["source"] == "gl"
     assert _app_db() == mock_app.tenant_db
+
+
+def test_serialize_bas_report_groups_mobile_sections():
+    payload = serialize_bas_report(
+        {
+            "company": "Acme Pty Ltd",
+            "period": "Q1 2026",
+            "preset": "quarter",
+            "from_date": "2026-01-01",
+            "to_date": "2026-03-31",
+            "currency": "AUD",
+            "g1": 82300.0,
+            "g2": 1500.0,
+            "g11": 57800.0,
+            "gst_collected_1a": 7660.0,
+            "gst_paid_1b": 5254.55,
+            "net_gst": 2405.45,
+            "gst_to_pay": 2405.45,
+            "gst_refund": 0.0,
+            "flagged_transactions_count": 3,
+            "validation_message": "GST validation issues detected",
+            "source": "au_bas_report",
+        }
+    )
+    assert payload["sales"]["g1"] == 82300.0
+    assert payload["sales"]["g2"] == 1500.0
+    assert payload["sales"]["gst_on_sales_1a"] == 7660.0
+    assert payload["purchases"]["g11"] == 57800.0
+    assert payload["purchases"]["gst_on_purchases_1b"] == 5254.0
+    assert payload["summary"]["net_gst_payable"] == 2405.0
+    assert payload["alerts"]["flagged_transactions_count"] == 3
+    assert payload["alerts"]["validation_message"] == "GST validation issues detected"
+    assert payload["from_date"] == "2026-01-01"
+    assert payload["to_date"] == "2026-03-31"
+
+
+def test_count_flagged_gst_transactions_detects_missing_tax_rows():
+    mock_frappe.get_all.side_effect = [
+        [{"name": "PI-1", "taxes_and_charges": "GST Template"}],
+        [],
+    ]
+    count, message = count_flagged_gst_transactions(
+        "Acme Pty Ltd", date(2026, 1, 1), date(2026, 3, 31)
+    )
+    assert count == 1
+    assert message == "GST validation issues detected"
+
+
+def test_build_bas_report_includes_alerts_and_sections():
+    mock_frappe.get_attr.side_effect = Exception("module missing")
+    mock_frappe.db.get_value.return_value = {
+        "account_1a": "GST Collected - A",
+        "account_1b": "GST Paid - A",
+    }
+    mock_frappe.db.table_exists.return_value = True
+    mock_frappe.get_all.side_effect = [
+        ["Sales - A"],
+        [{"credit_in_account_currency": 100, "debit_in_account_currency": 0}],
+        [{"debit_in_account_currency": 40, "credit_in_account_currency": 0}],
+        [{"credit_in_account_currency": 500, "debit_in_account_currency": 0}],
+        [],
+    ]
+    mock_app.db.get_value.return_value = "AUD"
+
+    result = build_bas_report(
+        mock_app.db,
+        "Acme Pty Ltd",
+        "custom",
+        "2026-01-01",
+        "2026-03-31",
+        today=date(2026, 6, 15),
+    )
+
+    assert result["sales"]["g1"] == 600.0
+    assert result["sales"]["gst_on_sales_1a"] == 100.0
+    assert result["purchases"]["gst_on_purchases_1b"] == 40.0
+    assert result["summary"]["net_gst_payable"] == 60.0
+    assert result["alerts"]["flagged_transactions_count"] == 0
+    assert result["from_date"] == "2026-01-01"
+    assert result["to_date"] == "2026-03-31"
+
+
+def test_get_bas_report_http_handler_uses_custom_dates():
+    sys.modules["flask"].request.args = {
+        "period": "custom",
+        "from_date": "2026-01-01",
+        "to_date": "2026-03-31",
+    }
+    mock_frappe.get_attr.side_effect = Exception("module missing")
+    mock_frappe.db.get_value.side_effect = lambda doctype, filters, field=None, **kw: (
+        {"account_1a": "GST Collected - A", "account_1b": "GST Paid - A"}
+        if doctype == "AU Simpler BAS Report Setup"
+        else "AUD"
+        if doctype == "Company"
+        else None
+    )
+    mock_frappe.db.table_exists.return_value = True
+    mock_frappe.get_all.side_effect = [
+        ["Sales - A"],
+        [{"credit_in_account_currency": 50, "debit_in_account_currency": 0}],
+        [{"debit_in_account_currency": 20, "credit_in_account_currency": 0}],
+        [{"credit_in_account_currency": 200, "debit_in_account_currency": 0}],
+        [],
+    ]
+
+    result = get_bas_report("test_user")
+
+    assert result["preset"] == "custom"
+    assert result["sales"]["g1"] == 250.0
+    assert "alerts" in result
+    assert "summary" in result

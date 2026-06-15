@@ -307,6 +307,7 @@ def _payload_from_amounts(
         "to_date": to_date.isoformat(),
         "currency": currency,
         "g1": _floor_currency(amounts.get("g1")),
+        "g2": _floor_currency(amounts.get("g2")),
         "g11": _floor_currency(amounts.get("g11")),
         "gst_collected_1a": amount_1a,
         "gst_paid_1b": amount_1b,
@@ -336,12 +337,14 @@ def serialize_bas_summary(
     amount_1b = _floor_currency(doc.get("1b"))
     net_gst = _floor_currency(doc.get("net_gst"))
     g11 = _floor_currency(doc.get("g11"))
+    g2 = _floor_currency(doc.get("g2"))
     gst_to_pay = max(0.0, amount_1a - amount_1b)
     gst_refund = max(0.0, amount_1b - amount_1a)
 
     return _payload_from_amounts(
         {
             "g1": g1,
+            "g2": g2,
             "g11": g11,
             "1a": amount_1a,
             "1b": amount_1b,
@@ -406,3 +409,140 @@ def build_bas_summary(
         currency=currency,
         source="gl",
     )
+
+
+def _is_gst_tax_row(row: Dict[str, Any]) -> bool:
+    desc = str(row.get("description") or "").lower()
+    head = str(row.get("account_head") or "").lower()
+    return "gst" in desc or "gst" in head
+
+
+def count_flagged_gst_transactions(
+    company: str,
+    from_date: date,
+    to_date: date,
+) -> Tuple[int, str]:
+    """Count purchase invoices in the period with missing or inconsistent GST rows."""
+    if not _table_exists("Purchase Invoice"):
+        return 0, ""
+
+    invoices = frappe.get_all(
+        "Purchase Invoice",
+        filters={
+            "company": company,
+            "docstatus": ["<", 2],
+            "posting_date": ["between", [from_date.isoformat(), to_date.isoformat()]],
+        },
+        fields=["name", "taxes_and_charges"],
+    ) or []
+
+    flagged = 0
+    for inv in invoices:
+        name = inv.get("name")
+        if not name:
+            continue
+        taxes = frappe.get_all(
+            "Purchase Taxes and Charges",
+            filters={"parent": name, "parenttype": "Purchase Invoice"},
+            fields=["description", "account_head", "rate", "tax_amount"],
+        ) or []
+        if inv.get("taxes_and_charges") and not taxes:
+            flagged += 1
+            continue
+        for row in taxes:
+            if not _is_gst_tax_row(row):
+                continue
+            rate = _as_number(row.get("rate"))
+            tax_amount = _as_number(row.get("tax_amount"))
+            account_head = str(row.get("account_head") or "").strip()
+            if not account_head or (rate > 0 and tax_amount <= 0):
+                flagged += 1
+                break
+
+    if flagged:
+        return flagged, "GST validation issues detected"
+    return 0, ""
+
+
+def serialize_bas_report(summary: Dict[str, Any]) -> Dict[str, Any]:
+    """Shape BAS summary for the mobile BAS Report screen."""
+    amount_1a = _floor_currency(summary.get("gst_collected_1a"))
+    amount_1b = _floor_currency(summary.get("gst_paid_1b"))
+    net_gst = _floor_currency(summary.get("net_gst", abs(amount_1a - amount_1b)))
+    gst_to_pay = _floor_currency(summary.get("gst_to_pay", max(0.0, amount_1a - amount_1b)))
+    gst_refund = _floor_currency(summary.get("gst_refund", max(0.0, amount_1b - amount_1a)))
+    g2 = _floor_currency(summary.get("g2"))
+    g11 = _floor_currency(summary.get("g11"))
+    flagged_count = int(summary.get("flagged_transactions_count") or 0)
+    validation_message = str(summary.get("validation_message") or "")
+
+    return {
+        "company": summary.get("company"),
+        "period": summary.get("period"),
+        "preset": summary.get("preset"),
+        "from_date": summary.get("from_date"),
+        "to_date": summary.get("to_date"),
+        "currency": summary.get("currency"),
+        "sales": {
+            "g1": _floor_currency(summary.get("g1")),
+            "g2": g2,
+            "gst_on_sales_1a": amount_1a,
+        },
+        "purchases": {
+            "g11": g11,
+            "gst_on_purchases_1b": amount_1b,
+        },
+        "summary": {
+            "net_gst_payable": net_gst,
+            "gst_to_pay": gst_to_pay,
+            "gst_refund": gst_refund,
+        },
+        "alerts": {
+            "flagged_transactions_count": flagged_count,
+            "validation_message": validation_message,
+        },
+        "bas_report": summary.get("bas_report"),
+        "updated_at": summary.get("updated_at"),
+        "source": summary.get("source"),
+        "reporting_method": summary.get("reporting_method"),
+        # Flat BAS codes for clients that prefer a single-level map.
+        "g1": _floor_currency(summary.get("g1")),
+        "g2": g2,
+        "g11": g11,
+        "gst_collected_1a": amount_1a,
+        "gst_paid_1b": amount_1b,
+        "net_gst": net_gst,
+        "flagged_transactions_count": flagged_count,
+        "validation_message": validation_message,
+    }
+
+
+def build_bas_report(
+    db: Any,
+    company: str,
+    preset: str,
+    from_raw: Any,
+    to_raw: Any,
+    *,
+    today: Optional[date] = None,
+) -> Dict[str, Any]:
+    """BAS report payload for the mobile screen (sales, purchases, summary, alerts)."""
+    summary = build_bas_summary(
+        db,
+        company,
+        preset,
+        from_raw,
+        to_raw,
+        today=today,
+    )
+    from_date = _safe_date(summary.get("from_date"))
+    to_date = _safe_date(summary.get("to_date"))
+    if not from_date or not to_date:
+        frappe.throw("Invalid BAS report period")
+
+    flagged_count, validation_message = count_flagged_gst_transactions(
+        company, from_date, to_date
+    )
+    summary["flagged_transactions_count"] = flagged_count
+    summary["validation_message"] = validation_message
+    return serialize_bas_report(summary)
