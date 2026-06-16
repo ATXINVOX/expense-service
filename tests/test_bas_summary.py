@@ -20,6 +20,7 @@ from expense_tracker.bas_summary import (  # noqa: E402
     count_flagged_gst_transactions,
     ensure_bas_accounts_configured,
     find_or_create_bas_report,
+    normalize_bas_report_dates,
     resolve_bas_period,
     serialize_bas_report,
     serialize_bas_summary,
@@ -112,6 +113,20 @@ def test_ensure_bas_accounts_configured_incomplete_accounts_raises():
         ensure_bas_accounts_configured("Acme Pty Ltd")
 
 
+def test_normalize_bas_report_dates_quarterly_snaps_june_to_q2():
+    mock_frappe.db.get_value.return_value = "Quarterly"
+    fd, td = normalize_bas_report_dates("Acme Pty Ltd", date(2026, 6, 1), date(2026, 6, 30))
+    assert fd == date(2026, 4, 1)
+    assert td == date(2026, 6, 30)
+
+
+def test_normalize_bas_report_dates_monthly_keeps_calendar_month():
+    mock_frappe.db.get_value.return_value = "Monthly"
+    fd, td = normalize_bas_report_dates("Acme Pty Ltd", date(2026, 6, 1), date(2026, 6, 30))
+    assert fd == date(2026, 6, 1)
+    assert td == date(2026, 6, 30)
+
+
 def test_find_or_create_bas_report_returns_existing():
     mock_frappe.get_all.return_value = [{"name": "BAS-EXISTING"}]
     name = find_or_create_bas_report("Acme Pty Ltd", date(2026, 4, 1), date(2026, 6, 30))
@@ -129,6 +144,19 @@ def test_find_or_create_bas_report_inserts_when_missing():
     assert name == "BAS-NEW"
     created.insert.assert_called_once()
     mock_frappe.db.commit.assert_called_once()
+
+
+def test_find_or_create_bas_report_reuses_overlapping_quarter_for_june():
+    mock_frappe.db.get_value.return_value = "Quarterly"
+    mock_frappe.get_all.side_effect = [
+        [],
+        [{"name": "BAS-Q2", "start_date": "2026-04-01", "end_date": "2026-06-30"}],
+    ]
+
+    name = find_or_create_bas_report("Acme Pty Ltd", date(2026, 6, 1), date(2026, 6, 30))
+
+    assert name == "BAS-Q2"
+    mock_frappe.new_doc.assert_not_called()
 
 
 def test_serialize_bas_summary_maps_labels():
