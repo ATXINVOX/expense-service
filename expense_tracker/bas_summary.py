@@ -17,6 +17,10 @@ _GET_GST_PATH = (
     "erpnext_australian_localisation.erpnext_australian_localisation"
     ".doctype.au_bas_report.au_bas_report.get_gst"
 )
+_GET_QUARTER_DATES_PATH = (
+    "erpnext_australian_localisation.erpnext_australian_localisation"
+    ".doctype.au_bas_report.au_bas_report.get_quaterly_start_end_date"
+)
 
 
 def _as_number(value: Any) -> float:
@@ -245,33 +249,161 @@ def compute_simpler_bas_from_gl(
 
 
 def find_or_create_bas_report(company: str, from_date: date, to_date: date) -> str:
-    """Return AU BAS Report name for the exact period (create when missing)."""
+    """Return AU BAS Report name for the company period (create when missing).
+
+    Dates are normalised to the company's Monthly or Quarterly BAS cycle before
+    lookup/insert, matching AU Localisation desk behaviour. Overlapping reports are
+    reused instead of failing insert with "BAS Report found for this period".
+    """
     if not _table_exists("AU BAS Report"):
         frappe.throw(
             "AU BAS Report is not available on this site.",
             frappe.ValidationError,
         )
 
-    start_s = from_date.isoformat()
-    end_s = to_date.isoformat()
+    norm_from, norm_to = normalize_bas_report_dates(company, from_date, to_date)
+
+    existing = find_bas_report_name_exact(company, norm_from, norm_to)
+    if existing:
+        return existing
+
+    overlap = find_overlapping_bas_report(company, norm_from, norm_to)
+    if overlap:
+        return overlap
+
+    doc = frappe.new_doc("AU BAS Report")
+    doc.company = company
+    doc.start_date = norm_from.isoformat()
+    doc.end_date = norm_to.isoformat()
+    doc.reporting_status = "In Review"
+    doc.reporting_method = "Simpler BAS reporting method"
+    try:
+        doc.insert(ignore_permissions=True)
+        frappe.db.commit()
+        return str(doc.name)
+    except frappe.ValidationError as exc:
+        if "BAS Report found for this period" in str(exc):
+            recovered = find_overlapping_bas_report(company, norm_from, norm_to)
+            if recovered:
+                return recovered
+        raise
+
+
+def _periods_overlap(
+    start_a: date,
+    end_a: date,
+    start_b: date,
+    end_b: date,
+) -> bool:
+    return start_a <= end_b and end_a >= start_b
+
+
+def get_company_bas_reporting_period(company: str) -> str:
+    if not _table_exists("AU BAS Reporting Period"):
+        return "Quarterly"
+    period = frappe.db.get_value(
+        "AU BAS Reporting Period",
+        {"company": company},
+        "reporting_period",
+    )
+    if period in ("Monthly", "Quarterly"):
+        return period
+    return "Quarterly"
+
+
+def normalize_bas_report_dates(
+    company: str,
+    from_date: date,
+    to_date: date,
+) -> Tuple[date, date]:
+    """Snap to calendar month or AU quarter per company BAS settings."""
+    reporting_period = get_company_bas_reporting_period(company)
+    anchor = from_date if from_date <= to_date else to_date
+
+    if reporting_period == "Monthly":
+        month_start = date(anchor.year, anchor.month, 1)
+        last_day = calendar.monthrange(anchor.year, anchor.month)[1]
+        month_end = date(anchor.year, anchor.month, last_day)
+        return month_start, month_end
+
+    try:
+        get_quarter_dates = frappe.get_attr(_GET_QUARTER_DATES_PATH)
+        result = get_quarter_dates(anchor.isoformat())
+        if isinstance(result, (list, tuple)) and len(result) >= 2:
+            quarter_start = _safe_date(result[0])
+            quarter_end = _safe_date(result[1])
+            if quarter_start and quarter_end:
+                return quarter_start, quarter_end
+    except Exception:
+        pass
+
+    return _quarter_bounds(anchor)
+
+
+def find_bas_report_name_exact(
+    company: str,
+    from_date: date,
+    to_date: date,
+) -> Optional[str]:
     existing = frappe.get_all(
         "AU BAS Report",
-        filters={"company": company, "start_date": start_s, "end_date": end_s},
+        filters={
+            "company": company,
+            "start_date": from_date.isoformat(),
+            "end_date": to_date.isoformat(),
+        },
         fields=["name"],
         limit=1,
     )
     if existing:
         return str(existing[0].get("name") or "")
+    return None
 
-    doc = frappe.new_doc("AU BAS Report")
-    doc.company = company
-    doc.start_date = start_s
-    doc.end_date = end_s
-    doc.reporting_status = "In Review"
-    doc.reporting_method = "Simpler BAS reporting method"
-    doc.insert(ignore_permissions=True)
-    frappe.db.commit()
-    return str(doc.name)
+
+def find_overlapping_bas_report(
+    company: str,
+    from_date: date,
+    to_date: date,
+) -> Optional[str]:
+    years = {from_date.year, to_date.year}
+    rows: List[Dict[str, Any]] = []
+    for year in sorted(years):
+        rows.extend(
+            frappe.get_all(
+                "AU BAS Report",
+                filters={
+                    "company": company,
+                    "start_date": ["like", f"{year}%"],
+                },
+                fields=["name", "start_date", "end_date"],
+            )
+        )
+
+    matches: List[Tuple[str, date, date]] = []
+    for row in rows:
+        name = str(row.get("name") or "")
+        row_start = _safe_date(row.get("start_date"))
+        row_end = _safe_date(row.get("end_date"))
+        if not name or not row_start or not row_end:
+            continue
+        if _periods_overlap(from_date, to_date, row_start, row_end):
+            matches.append((name, row_start, row_end))
+
+    if not matches:
+        return None
+
+    for name, row_start, row_end in matches:
+        if row_start == from_date and row_end == to_date:
+            return name
+
+    for name, row_start, row_end in matches:
+        if row_start <= from_date and row_end >= to_date:
+            return name
+
+    if len(matches) == 1:
+        return matches[0][0]
+
+    return matches[0][0]
 
 
 def refresh_bas_report(report_name: str):
