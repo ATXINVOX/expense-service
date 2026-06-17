@@ -81,22 +81,29 @@ def test_resolve_bas_period_month():
     fd, td, label, preset = resolve_bas_period("month", None, None, today)
     assert preset == "month"
     assert fd == date(2026, 6, 1)
-    assert td == today
+    assert td == date(2026, 6, 30)
     assert label == "June 2026"
 
 
-def test_resolve_bas_period_custom_swaps_dates():
+def test_resolve_bas_period_accepts_explicit_month_in_financial_year():
     fd, td, label, preset = resolve_bas_period(
-        "custom", "2026-05-10", "2026-05-01", date(2026, 6, 1)
+        "month", "2026-05-01", "2026-05-31", date(2026, 6, 1)
     )
-    assert preset == "custom"
+    assert preset == "month"
     assert fd == date(2026, 5, 1)
-    assert td == date(2026, 5, 10)
+    assert td == date(2026, 5, 31)
     assert label == "May 2026"
 
 
+def test_resolve_bas_period_rejects_dates_outside_financial_year():
+    with pytest.raises(mock_frappe.ValidationError, match="financial year"):
+        resolve_bas_period(
+            "month", "2025-05-01", "2025-05-31", date(2026, 6, 1)
+        )
+
+
 def test_resolve_bas_period_invalid_raises():
-    with pytest.raises(Exception, match="period must be one of"):
+    with pytest.raises(mock_frappe.ValidationError, match="period must be one of"):
         resolve_bas_period("year", None, None, date(2026, 6, 1))
 
 
@@ -374,7 +381,7 @@ def test_build_bas_report_includes_alerts_and_sections():
     result = build_bas_report(
         mock_app.db,
         "Acme Pty Ltd",
-        "custom",
+        "quarter",
         "2026-01-01",
         "2026-03-31",
         today=date(2026, 6, 15),
@@ -389,9 +396,9 @@ def test_build_bas_report_includes_alerts_and_sections():
     assert result["to_date"] == "2026-03-31"
 
 
-def test_get_bas_report_http_handler_uses_custom_dates():
+def test_get_bas_report_http_handler_uses_explicit_quarter_dates():
     sys.modules["flask"].request.args = {
-        "period": "custom",
+        "period": "quarter",
         "from_date": "2026-01-01",
         "to_date": "2026-03-31",
     }
@@ -414,7 +421,7 @@ def test_get_bas_report_http_handler_uses_custom_dates():
 
     result = get_bas_report("test_user")
 
-    assert result["preset"] == "custom"
+    assert result["preset"] == "quarter"
     assert result["sales"]["g1"] == 250.0
     assert "alerts" in result
     assert "summary" in result

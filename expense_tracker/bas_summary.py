@@ -64,37 +64,70 @@ def _quarter_bounds(today: date) -> Tuple[date, date]:
     return from_date, to_date
 
 
+def _au_financial_year_bounds(today: date) -> Tuple[date, date]:
+    """Australian financial year: 1 July – 30 June."""
+    if today.month >= 7:
+        return date(today.year, 7, 1), date(today.year + 1, 6, 30)
+    return date(today.year - 1, 7, 1), date(today.year, 6, 30)
+
+
+def _validate_bas_period_in_financial_year(from_date: date, to_date: date, today: date) -> None:
+    fy_start, fy_end = _au_financial_year_bounds(today)
+    if from_date < fy_start or to_date > fy_end:
+        frappe.throw(
+            "BAS period must fall within the current financial year (1 July – 30 June).",
+            frappe.ValidationError,
+        )
+
+
 def resolve_bas_period(
     preset: str,
     from_raw: Any,
     to_raw: Any,
     today: date,
 ) -> Tuple[date, date, str, str]:
-    """Return (from_date, to_date, period_label, preset_key)."""
-    p = (preset or "quarter").strip().lower()
+    """Return (from_date, to_date, period_label, preset_key).
 
-    if p == "custom":
-        fd = _safe_date(from_raw)
-        td = _safe_date(to_raw)
-        if not fd or not td:
-            frappe.throw("custom period requires from_date and to_date (YYYY-MM-DD)")
+    BAS supports **monthly** or **quarterly** periods only, within the current AU
+    financial year (July–June). Explicit ``from_date``/``to_date`` are accepted when
+    they denote a full calendar month or quarter inside that window.
+    """
+    p = (preset or "quarter").strip().lower()
+    if p not in ("month", "quarter", "q"):
+        frappe.throw("period must be one of: quarter, month", frappe.ValidationError)
+
+    fd = _safe_date(from_raw)
+    td = _safe_date(to_raw)
+    if fd and td:
         if fd > td:
             fd, td = td, fd
-        if td - fd > timedelta(days=366):
-            frappe.throw("Custom BAS date range cannot exceed 366 days")
-        return fd, td, _period_label(fd, td), "custom"
+        _validate_bas_period_in_financial_year(fd, td, today)
+        preset_key = "month" if p == "month" else "quarter"
+        if preset_key == "month":
+            last_day = calendar.monthrange(fd.year, fd.month)[1]
+            fd = date(fd.year, fd.month, 1)
+            td = date(fd.year, fd.month, last_day)
+        else:
+            fd, td = _quarter_bounds(fd)
+        _validate_bas_period_in_financial_year(fd, td, today)
+        label = (
+            fd.strftime("%B %Y")
+            if preset_key == "month"
+            else f"Q{(fd.month - 1) // 3 + 1} {fd.year}"
+        )
+        return fd, td, label, preset_key
 
     if p == "month":
-        fd = today.replace(day=1)
-        td = today
+        last_day = calendar.monthrange(today.year, today.month)[1]
+        fd = date(today.year, today.month, 1)
+        td = date(today.year, today.month, last_day)
+        _validate_bas_period_in_financial_year(fd, td, today)
         return fd, td, today.strftime("%B %Y"), "month"
 
-    if p in ("quarter", "q"):
-        fd, td = _quarter_bounds(today)
-        q = (fd.month - 1) // 3 + 1
-        return fd, td, f"Q{q} {fd.year}", "quarter"
-
-    frappe.throw("period must be one of: quarter, month, custom")
+    fd, td = _quarter_bounds(today)
+    _validate_bas_period_in_financial_year(fd, td, today)
+    q = (fd.month - 1) // 3 + 1
+    return fd, td, f"Q{q} {fd.year}", "quarter"
 
 
 def _period_label(from_date: date, to_date: date) -> str:
@@ -263,6 +296,8 @@ def find_or_create_bas_report(company: str, from_date: date, to_date: date) -> s
 
     norm_from, norm_to = normalize_bas_report_dates(company, from_date, to_date)
 
+    _validate_bas_period_in_financial_year(norm_from, norm_to, date.today())
+
     existing = find_bas_report_name_exact(company, norm_from, norm_to)
     if existing:
         return existing
@@ -324,6 +359,7 @@ def normalize_bas_report_dates(
         month_start = date(anchor.year, anchor.month, 1)
         last_day = calendar.monthrange(anchor.year, anchor.month)[1]
         month_end = date(anchor.year, anchor.month, last_day)
+        _validate_bas_period_in_financial_year(month_start, month_end, date.today())
         return month_start, month_end
 
     try:
@@ -333,11 +369,15 @@ def normalize_bas_report_dates(
             quarter_start = _safe_date(result[0])
             quarter_end = _safe_date(result[1])
             if quarter_start and quarter_end:
-                return quarter_start, quarter_end
+                norm_from, norm_to = quarter_start, quarter_end
+                _validate_bas_period_in_financial_year(norm_from, norm_to, date.today())
+                return norm_from, norm_to
     except Exception:
         pass
 
-    return _quarter_bounds(anchor)
+    norm_from, norm_to = _quarter_bounds(anchor)
+    _validate_bas_period_in_financial_year(norm_from, norm_to, date.today())
+    return norm_from, norm_to
 
 
 def find_bas_report_name_exact(
