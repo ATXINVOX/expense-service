@@ -71,6 +71,22 @@ sys.modules["frappe"] = mock_frappe
 sys.modules["frappe_microservice"] = mock_microservice
 sys.modules["frappe_microservice.controller"] = mock_microservice_controller
 
+_utils_mod = ModuleType("frappe.utils")
+
+
+def _getdate(value):
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    return date.fromisoformat(str(value)[:10])
+
+
+_utils_mod.getdate = _getdate
+sys.modules["frappe.utils"] = _utils_mod
+
 
 def _configure_frappe_throw():
     """Make frappe.throw raise so frappe_client_submit errors are testable."""
@@ -105,7 +121,11 @@ if "flask" not in sys.modules:
     _flask_stub.request = MagicMock()
     sys.modules["flask"] = _flask_stub
 
-from controllers.purchase_invoice import PurchaseInvoice, _expense_title
+from controllers.purchase_invoice import (
+    PurchaseInvoice,
+    _expense_title,
+    normalize_purchase_invoice_payment_dates,
+)
 from expense_tracker.api import (
     create_purchase_invoice,
     delete_purchase_invoice,
@@ -1345,6 +1365,32 @@ def test_custom_fields_queryable_via_resource_api_fields():
     assert resource_fields["expense_item_name"] == "Printer Paper"
     assert resource_fields["expense_item_group"] == "Office Supplies"
     assert resource_fields["expense_items_count"] == 1
+
+
+def test_normalize_purchase_invoice_payment_dates_resets_bill_date_to_posting():
+    doc = MockDocumentController({
+        "posting_date": "2026-06-15",
+        "due_date": "2026-06-15",
+        "bill_date": "2026-06-17",
+    })
+
+    normalize_purchase_invoice_payment_dates(doc)
+
+    assert doc.bill_date == "2026-06-15"
+    assert doc.due_date == "2026-06-15"
+
+
+def test_normalize_purchase_invoice_payment_dates_keeps_later_due_date():
+    doc = MockDocumentController({
+        "posting_date": "2026-06-15",
+        "due_date": "2026-06-30",
+        "bill_date": "2026-06-17",
+    })
+
+    normalize_purchase_invoice_payment_dates(doc)
+
+    assert doc.bill_date == "2026-06-15"
+    assert doc.due_date == "2026-06-30"
 
 
 # ── frappe.client.submit wrapper (Purchase Invoice + tenant checks) ───────────

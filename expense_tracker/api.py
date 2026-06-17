@@ -15,6 +15,7 @@ from controllers.purchase_invoice import (
     clear_company_currency_cache,
     ensure_purchase_invoice_item_defaults,
     ensure_purchase_invoice_submit_prereqs,
+    normalize_purchase_invoice_payment_dates,
 )
 
 logger = logging.getLogger(__name__)
@@ -871,6 +872,7 @@ def frappe_client_submit(user):
                     doc.set_missing_values(for_validate=True)
             except Exception as exc:
                 logger.info("SUBMIT: set_missing_values(for_validate=True) skipped: %s", exc)
+            normalize_purchase_invoice_payment_dates(doc)
             clear_company_currency_cache(co)
             # Force request-level cache used by erpnext.get_company_currency() (must match doc.company).
             cur_master = frappe.db.get_value("Company", co, "default_currency")

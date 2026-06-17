@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import date, datetime
 from typing import Any, Dict, List
 
 import frappe
@@ -1056,6 +1057,29 @@ def ensure_purchase_invoice_item_defaults(doc) -> None:
             _set_value(item, "delivered_by_supplier", 0)
 
 
+def normalize_purchase_invoice_payment_dates(doc) -> None:
+    """Align bill_date and due_date with posting_date for mobile expense invoices.
+
+    ERPNext validates ``due_date >= bill_date`` (Supplier Invoice Date). Drafts saved
+    on an earlier day can fail on submit when ``set_missing_values`` sets ``bill_date``
+    to today while ``due_date`` remains on the original posting date.
+    """
+    from frappe.utils import getdate
+
+    posting = _value(doc, "posting_date", None)
+    if not isinstance(posting, (str, date, datetime)):
+        return
+
+    doc.bill_date = posting
+    due = _value(doc, "due_date", None) or posting
+    if not isinstance(due, (str, date, datetime)):
+        due = posting
+    if getdate(due) < getdate(posting):
+        doc.due_date = posting
+    else:
+        doc.due_date = due
+
+
 def ensure_purchase_invoice_submit_prereqs(
     company: str, supplier: str | None, posting_date=None,
 ) -> None:
@@ -1466,5 +1490,7 @@ class PurchaseInvoice(DocumentController):
             self.set("taxes", [])
             for row in manual_taxes:
                 self.append("taxes", row)
+
+        normalize_purchase_invoice_payment_dates(doc)
 
         doc.flags.expense_pi_enriched = True
