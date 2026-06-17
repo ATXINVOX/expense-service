@@ -465,6 +465,17 @@ def _recent_expenses_from_rows(rows, limit: int = 10) -> list[dict]:
 
 
 def _invoice_filters(company: str, from_date: date, to_date: date):
+    """Submitted purchase invoices in range — used for spend totals and financial dashboard."""
+    return [
+        ["company", "=", company],
+        ["docstatus", "=", 1],
+        ["posting_date", ">=", from_date],
+        ["posting_date", "<=", to_date],
+    ]
+
+
+def _invoice_filters_include_drafts(company: str, from_date: date, to_date: date):
+    """Non-cancelled purchase invoices — draft list views only."""
     return [
         ["company", "=", company],
         ["docstatus", "<", 2],

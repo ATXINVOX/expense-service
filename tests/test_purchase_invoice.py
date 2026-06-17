@@ -547,7 +547,7 @@ def test_dashboard_summary_uses_user_default_company():
     first_query_params = mock_app.tenant_db.get_all.call_args_list[0].kwargs.get("filters")
     assert first_query_params == [
         ["company", "=", "Acme Pty Ltd"],
-        ["docstatus", "<", 2],
+        ["docstatus", "=", 1],
         ["posting_date", ">=", date.today().replace(day=1)],
         ["posting_date", "<=", date.today()],
     ]
