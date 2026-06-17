@@ -133,6 +133,7 @@ from expense_tracker.api import (
     get_dashboard_summary,
     get_financial_dashboard,
     get_purchase_invoice,
+    update_purchase_invoice,
     _add_months,
     _aggregate_by_posting_date,
     _app_db,
@@ -1393,6 +1394,21 @@ def test_normalize_purchase_invoice_payment_dates_keeps_later_due_date():
     assert doc.due_date == "2026-06-30"
 
 
+def test_normalize_purchase_invoice_payment_dates_aligns_payment_schedule():
+    doc = MockDocumentController({
+        "posting_date": "2026-07-15",
+        "due_date": "2026-06-17",
+        "bill_date": "2026-06-17",
+        "payment_schedule": [{"due_date": "2026-06-17"}],
+    })
+
+    normalize_purchase_invoice_payment_dates(doc)
+
+    assert doc.bill_date == "2026-07-15"
+    assert doc.due_date == "2026-07-15"
+    assert doc.payment_schedule[0]["due_date"] == "2026-07-15"
+
+
 # ── frappe.client.submit wrapper (Purchase Invoice + tenant checks) ───────────
 
 
@@ -1683,6 +1699,59 @@ def test_create_purchase_invoice_returns_201_with_slim_body():
     assert out["doctype"] == "Purchase Invoice"
     assert out["id"] == "ACC-NEW"
     mock_app.tenant_db.insert_doc.assert_called_once()
+
+
+def test_update_purchase_invoice_normalizes_dates_before_save(monkeypatch):
+    sys.modules["flask"].request.get_json.return_value = {
+        "posting_date": "2026-07-15",
+        "supplier": "Test Supplier",
+        "items": [{"item_code": "Miscellaneous", "qty": 1, "rate": 400}],
+        "company": "Acme Pty Ltd",
+    }
+    mock_frappe.defaults = MagicMock()
+    mock_frappe.defaults.get_user_default.return_value = "Acme Pty Ltd"
+    mock_frappe.db.get_value.return_value = {"docstatus": 0, "company": "Acme Pty Ltd"}
+
+    mock_doc = MagicMock()
+    mock_doc.flags = MagicMock()
+    mock_doc.update = MagicMock()
+    mock_doc.save = MagicMock()
+    mock_doc.get = MagicMock(side_effect=lambda key, default=None: getattr(mock_doc, key, default))
+    mock_doc.name = "ACC-PINV-2026-00185"
+    mock_doc.docstatus = 0
+    mock_doc.grand_total = 400.0
+    mock_doc.currency = "AUD"
+    mock_doc.status = "Draft"
+    mock_app.tenant_db.get_doc.return_value = mock_doc
+    mock_app.tenant_db.hooks.run_hooks = MagicMock()
+
+    normalize_calls = []
+
+    def _track_normalize(doc):
+        normalize_calls.append(doc)
+
+    monkeypatch.setattr(
+        "expense_tracker.api.normalize_purchase_invoice_payment_dates",
+        _track_normalize,
+    )
+    monkeypatch.setattr(
+        "expense_tracker.api._project_purchase_invoice_api",
+        lambda doc: {"id": doc.name, "name": doc.name},
+    )
+    monkeypatch.setattr(
+        "expense_tracker.api.ensure_purchase_invoice_item_defaults",
+        MagicMock(),
+    )
+
+    result = update_purchase_invoice("user@example.com", "ACC-PINV-2026-00185")
+
+    assert result["success"] is True
+    assert result["name"] == "ACC-PINV-2026-00185"
+    assert len(normalize_calls) >= 2
+    mock_doc.update.assert_called_once()
+    mock_doc.save.assert_called_once()
+    mock_app.tenant_db.hooks.run_hooks.assert_any_call(mock_doc, "before_validate")
+    mock_app.tenant_db.hooks.run_hooks.assert_any_call(mock_doc, "validate")
 
 
 # ── delete_purchase_invoice (resource DELETE: cancel if submitted, then delete) ─

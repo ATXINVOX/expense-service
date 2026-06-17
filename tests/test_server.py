@@ -40,6 +40,10 @@ def test_server_registers_purchase_invoice_resource():
             for c in app.register_resource.call_args_list
         )
         assert pi_registered, "Purchase Invoice resource should be registered"
+        put_handler = app.register_resource.call_args_list[-1].kwargs.get(
+            "custom_handlers", {}
+        ).get("put")
+        assert put_handler is not None, "Purchase Invoice PUT handler should be registered"
     finally:
         if original_ms is not None:
             sys.modules["frappe_microservice"] = original_ms

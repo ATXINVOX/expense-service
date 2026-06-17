@@ -1028,6 +1028,98 @@ def create_purchase_invoice(user):
         return _build_error(str(e), 400, "ValidationError")
 
 
+def update_purchase_invoice(user, name):
+    """PUT /api/resource/Purchase Invoice/<name> — update draft expense fields."""
+    import urllib.parse
+    from flask import request
+
+    name_raw = urllib.parse.unquote(str(name or "")).strip()
+    nm, err = _validate_name(name_raw)
+    if err:
+        return err
+
+    data = request.get_json(silent=True)
+    if not data:
+        return {"error": "Request body required"}, 400
+
+    try:
+        company = _resolve_company()
+        if not company:
+            return _build_error(
+                "Company is required. No company found for the current user.",
+                400,
+                "ValidationError",
+            )
+
+        row = frappe.db.get_value(
+            "Purchase Invoice",
+            nm,
+            ["docstatus", "company"],
+            as_dict=True,
+        )
+        if not row:
+            return _build_error(
+                f"Purchase Invoice '{nm}' not found",
+                404,
+                "DoesNotExistError",
+            )
+
+        inv_company = (row.get("company") or "").strip()
+        if inv_company and inv_company != company:
+            return _build_error(
+                "You do not have access to this expense",
+                403,
+                "PermissionError",
+            )
+
+        docstatus = int(row.get("docstatus") or 0)
+        if docstatus != 0:
+            status_label = "Submitted" if docstatus == 1 else "Cancelled"
+            return _build_error(
+                f"Only draft expenses (docstatus 0) can be updated. "
+                f"This invoice is {status_label} (docstatus={docstatus}).",
+                400,
+                "ValidationError",
+            )
+
+        doc = _app_db().get_doc("Purchase Invoice", nm, verify_tenant=True)
+        _app_db().hooks.run_hooks(doc, "before_update")
+        doc.update(data)
+        _app_db().hooks.run_hooks(doc, "before_validate")
+
+        try:
+            if hasattr(doc, "set_missing_values"):
+                doc.set_missing_values(for_validate=True)
+        except Exception as exc:
+            logger.info("PUT PI: set_missing_values(for_validate=True) skipped: %s", exc)
+
+        normalize_purchase_invoice_payment_dates(doc)
+        _app_db().hooks.run_hooks(doc, "validate")
+        normalize_purchase_invoice_payment_dates(doc)
+
+        doc.flags.ignore_permissions = True
+        ensure_purchase_invoice_item_defaults(doc)
+        doc.save()
+        frappe.db.commit()
+        _app_db().hooks.run_hooks(doc, "after_update")
+
+        out = _project_purchase_invoice_api(doc)
+        out["success"] = True
+        out["doctype"] = "Purchase Invoice"
+        return out
+
+    except frappe.PermissionError:
+        return {"error": "Access denied"}, 403
+    except frappe.DoesNotExistError:
+        return {"error": "Purchase Invoice not found"}, 404
+    except frappe.ValidationError as e:
+        logger.warning("PUT PI: validation name=%r user=%s: %s", name_raw, user, e)
+        return _build_error(f"Invalid input data: {e}", 400, "ValidationError")
+    except Exception as e:
+        logger.exception("PUT PI: unexpected error name=%r user=%s", name_raw, user)
+        return _build_error(str(e), 400, "ValidationError")
+
+
 def delete_purchase_invoice(user, name):
     """DELETE /api/resource/Purchase Invoice/<name>: cancel if submitted, then delete.
 

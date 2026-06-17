@@ -31,6 +31,7 @@ app.register_resource(
     custom_handlers={
         "get": expense_tracker_api.get_purchase_invoice,
         "post": expense_tracker_api.create_purchase_invoice,
+        "put": expense_tracker_api.update_purchase_invoice,
         "delete": expense_tracker_api.delete_purchase_invoice,
     },
 )

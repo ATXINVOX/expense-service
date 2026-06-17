@@ -1058,11 +1058,11 @@ def ensure_purchase_invoice_item_defaults(doc) -> None:
 
 
 def normalize_purchase_invoice_payment_dates(doc) -> None:
-    """Align bill_date and due_date with posting_date for mobile expense invoices.
+    """Align bill_date, due_date, and payment schedule rows for mobile expense invoices.
 
-    ERPNext validates ``due_date >= bill_date`` (Supplier Invoice Date). Drafts saved
-    on an earlier day can fail on submit when ``set_missing_values`` sets ``bill_date``
-    to today while ``due_date`` remains on the original posting date.
+    ERPNext validates ``due_date >= bill_date`` (Supplier Invoice Date). Partial PUT
+    bodies often change ``posting_date`` without ``due_date``, leaving stale values
+  that fail on save/submit.
     """
     from frappe.utils import getdate
 
@@ -1070,14 +1070,22 @@ def normalize_purchase_invoice_payment_dates(doc) -> None:
     if not isinstance(posting, (str, date, datetime)):
         return
 
-    doc.bill_date = posting
-    due = _value(doc, "due_date", None) or posting
+    bill = posting
+    _set_value(doc, "bill_date", bill)
+
+    due = _value(doc, "due_date", None) or bill
     if not isinstance(due, (str, date, datetime)):
-        due = posting
-    if getdate(due) < getdate(posting):
-        doc.due_date = posting
-    else:
-        doc.due_date = due
+        due = bill
+    if getdate(due) < getdate(bill):
+        due = bill
+    _set_value(doc, "due_date", due)
+
+    for row in list(_value(doc, "payment_schedule", []) or []):
+        row_due = _value(row, "due_date", None) or bill
+        if not isinstance(row_due, (str, date, datetime)):
+            row_due = bill
+        if getdate(row_due) < getdate(bill):
+            _set_value(row, "due_date", bill)
 
 
 def ensure_purchase_invoice_submit_prereqs(
@@ -1375,6 +1383,7 @@ class PurchaseInvoice(DocumentController):
         # runs before_validate again via run_before_save_methods — without this guard,
         # items/taxes are rebuilt twice and child rows duplicate → DuplicateEntryError.
         if getattr(doc.flags, "expense_pi_enriched", False):
+            normalize_purchase_invoice_payment_dates(doc)
             return
 
         company = _value(self, "company", None) or _resolve_company_from_user()
@@ -1494,3 +1503,6 @@ class PurchaseInvoice(DocumentController):
         normalize_purchase_invoice_payment_dates(doc)
 
         doc.flags.expense_pi_enriched = True
+
+    def validate(self):
+        normalize_purchase_invoice_payment_dates(self.doc)
