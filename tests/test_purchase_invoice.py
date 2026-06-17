@@ -149,6 +149,7 @@ def reset_mocks():
         "docstatus": 1,
         "status": "Submitted",
     }
+    mock_frappe.flags = type("Flags", (), {})()
     mock_frappe.get_attr.side_effect = _frappe_get_attr_side_effect
 
 
@@ -255,6 +256,56 @@ def test_purchase_invoice_gst_off_leaves_amount_without_tax_rows():
     assert doc.taxes_and_charges == ""
     assert doc.taxes == []
     assert doc.items[0]["rate"] == 90.0
+
+
+def test_purchase_invoice_mobile_gst_alias_applies_template_rows():
+    """Mobile sends taxes_and_charges: GST; server resolves company purchase template."""
+    mock_frappe.db.get_value.side_effect = _default_get_value
+    mock_frappe.get_all.side_effect = _default_get_all
+
+    doc = PurchaseInvoice(
+        {
+            "doctype": "Purchase Invoice",
+            "company": "Acme Pty Ltd",
+            "taxes_and_charges": "GST",
+            "items": [{"item_code": "Fuel", "rate": 100.0}],
+        }
+    )
+
+    doc.before_validate()
+
+    assert doc.taxes_and_charges == GST_TEMPLATE_NAME
+    assert len(doc.taxes) == 1
+    assert doc.taxes[0]["included_in_print_rate"] == 1
+
+
+def test_resolve_purchase_gst_template_creates_template_when_missing():
+    with patch(
+        "controllers.purchase_invoice._find_gst_template",
+        side_effect=[None, GST_TEMPLATE_NAME],
+    ), patch(
+        "controllers.purchase_invoice._ensure_purchase_gst_template",
+        return_value=GST_TEMPLATE_NAME,
+    ) as ensure_mock:
+        from controllers.purchase_invoice import _resolve_purchase_gst_template
+
+        resolved = _resolve_purchase_gst_template("Acme Pty Ltd", "GST")
+
+    assert resolved == GST_TEMPLATE_NAME
+    ensure_mock.assert_called_once_with("Acme Pty Ltd")
+
+
+def test_ensure_account_nested_set_rebuilds_when_accounts_unset():
+    mock_frappe.db.sql.return_value = [[4]]
+    rebuild_mock = MagicMock()
+    nestedset_mod = ModuleType("frappe.utils.nestedset")
+    nestedset_mod.rebuild_tree = rebuild_mock
+    sys.modules["frappe.utils.nestedset"] = nestedset_mod
+
+    from controllers.purchase_invoice import _ensure_account_nested_set
+
+    _ensure_account_nested_set("Acme Pty Ltd")
+    rebuild_mock.assert_called_once_with("Account")
 
 
 def test_purchase_invoice_uses_bas_account_1b_for_gst():

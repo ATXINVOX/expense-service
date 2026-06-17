@@ -628,6 +628,159 @@ def _find_gst_template(company: str | None = None):
     return None
 
 
+def _client_requests_purchase_gst(doc) -> bool:
+    """True when mobile/client opted into GST on a purchase invoice."""
+    tc = (_value(doc, "taxes_and_charges", None) or "").strip()
+    if tc:
+        tc_l = tc.lower()
+        if tc_l == "gst" or "gst" in tc_l:
+            return True
+    existing_taxes = [_serialise(t) for t in _value(doc, "taxes", []) or []]
+    return any(_is_gst_row(t) for t in existing_taxes)
+
+
+def _ensure_purchase_gst_template(company: str) -> str | None:
+    """Create the standard AU purchase GST template when missing (lazy provisioning)."""
+    if not company:
+        return None
+
+    existing = _find_gst_template(company)
+    if existing:
+        return existing
+
+    abbr = _company_abbr(company)
+    template_name = f"Non Capital (GST 10%) - {company}"
+    gst_account = f"GST Paid - {abbr}"
+    bas = _get_au_simpler_bas_accounts(company)
+    account_1b = _as_plain_str(bas.get("account_1b"))
+    if account_1b:
+        gst_account = account_1b
+
+    if not frappe.db.exists("Account", gst_account):
+        parent = f"Current Assets - {abbr}"
+        if not frappe.db.exists("Account", parent):
+            parent = f"Assets - {abbr}"
+        _ensure_account_row(
+            gst_account,
+            account_name="GST Paid",
+            company=company,
+            root_type="Asset",
+            report_type="Balance Sheet",
+            is_group=0,
+            account_type="Tax",
+            parent_account=parent if frappe.db.exists("Account", parent) else None,
+        )
+
+    tenant_id = ""
+    try:
+        tenant_id = _as_plain_str(_app_db().get_value("Company", company, "tenant_id"))
+    except Exception:
+        tenant_id = _as_plain_str(frappe.db.get_value("Company", company, "tenant_id"))
+
+    try:
+        frappe.db.sql(
+            """
+            INSERT IGNORE INTO `tabPurchase Taxes and Charges Template`
+            (name, title, company, tenant_id, is_default,
+             creation, modified, modified_by, owner, docstatus, idx)
+            VALUES (%(name)s, %(title)s, %(company)s, %(tenant_id)s, 1,
+                    NOW(), NOW(), 'Administrator', 'Administrator', 0, 0)
+            """,
+            {
+                "name": template_name,
+                "title": template_name,
+                "company": company,
+                "tenant_id": tenant_id,
+            },
+        )
+        child_name = f"{template_name}-row-1"
+        frappe.db.sql(
+            """
+            INSERT IGNORE INTO `tabPurchase Taxes and Charges`
+            (name, parent, parenttype, parentfield,
+             charge_type, account_head, description, rate,
+             add_deduct_tax, included_in_print_rate, category,
+             tenant_id, creation, modified, modified_by, owner, docstatus, idx)
+            VALUES (%(name)s, %(parent)s, 'Purchase Taxes and Charges Template', 'taxes',
+                    'On Net Total', %(account_head)s, 'GST 10%%', 10,
+                    'Add', 0, 'Total',
+                    %(tenant_id)s, NOW(), NOW(), 'Administrator', 'Administrator', 0, 1)
+            """,
+            {
+                "name": child_name,
+                "parent": template_name,
+                "account_head": gst_account,
+                "tenant_id": tenant_id,
+            },
+        )
+        frappe.db.commit()
+    except Exception as exc:
+        logger.warning("ensure_purchase_gst_template: could not create template for %r (%s)", company, exc)
+        frappe.db.rollback()
+
+    return _find_gst_template(company)
+
+
+def _resolve_purchase_gst_template(company: str, taxes_and_charges: str | None) -> str | None:
+    """Map mobile ``taxes_and_charges: GST`` to the company purchase tax template."""
+    tc = (taxes_and_charges or "").strip()
+    if not tc:
+        return None
+    if tc.lower() == "gst" or "gst" in tc.lower():
+        found = _find_gst_template(company)
+        return found or _ensure_purchase_gst_template(company)
+    if frappe.db.exists("Purchase Taxes and Charges Template", tc):
+        return tc
+    return _find_gst_template(company)
+
+
+def _company_accounts_nested_set_broken(company: str) -> bool:
+    """True when SQL-provisioned accounts still have lft=rgt=0 (breaks P&L rollups)."""
+    if not company:
+        return False
+    try:
+        result = frappe.db.sql(
+            """
+            SELECT COUNT(*)
+            FROM `tabAccount`
+            WHERE company = %s
+              AND COALESCE(lft, 0) = 0
+              AND COALESCE(rgt, 0) = 0
+            """,
+            (company,),
+        )
+        if not result or not isinstance(result, (list, tuple)):
+            return False
+        first = result[0]
+        count = first[0] if isinstance(first, (list, tuple)) else first
+        if not isinstance(count, (int, float)):
+            return False
+        return int(count) > 0
+    except Exception:
+        return False
+
+
+def _ensure_account_nested_set(company: str) -> None:
+    """Rebuild Account tree once per request when provisioning left lft/rgt unset."""
+    if not company:
+        return
+    flag_key = f"account_nested_set_rebuilt_{company}"
+    if getattr(frappe.flags, flag_key, False):
+        return
+    setattr(frappe.flags, flag_key, True)
+    if not _company_accounts_nested_set_broken(company):
+        return
+    try:
+        from frappe.utils.nestedset import rebuild_tree
+
+        rebuild_tree("Account")
+        frappe.db.commit()
+        logger.info("ensure_account_nested_set: rebuilt Account tree for company=%s", company)
+    except Exception as exc:
+        logger.warning("ensure_account_nested_set: rebuild_tree failed for %r (%s)", company, exc)
+        frappe.db.rollback()
+
+
 def _gst_template_rows(
     company: str,
     template_name: str = DEFAULT_GST_TEMPLATE,
@@ -907,6 +1060,7 @@ def ensure_purchase_invoice_submit_prereqs(
     company: str, supplier: str | None, posting_date=None,
 ) -> None:
     """Patch master data before doc.submit() so currency / exchange-rate validation passes."""
+    _ensure_account_nested_set(company)
     _ensure_company_default_currency(company)
     _get_default_cost_center(company)
     _ensure_default_payable_account(company)
@@ -1206,6 +1360,7 @@ class PurchaseInvoice(DocumentController):
         _set_value(self, "company", company)
         logger.info("before_validate: company=%s", company)
 
+        _ensure_account_nested_set(company)
         _ensure_company_default_currency(company)
         # Default currency and conversion_rate from company when not supplied,
         # preventing Frappe's party-account currency mismatch validation error.
@@ -1277,14 +1432,17 @@ class PurchaseInvoice(DocumentController):
         if expense_title:
             _set_value(self, "title", expense_title)
 
-        wants_gst = bool(_value(self, "taxes_and_charges", None))
+        wants_gst = _client_requests_purchase_gst(self)
         existing_taxes = [
             _serialise(tax) for tax in _value(self, "taxes", []) or []
         ]
         manual_taxes = [tax for tax in existing_taxes if not _is_gst_row(tax)]
 
         if wants_gst:
-            gst_template = _find_gst_template(company)
+            gst_template = _resolve_purchase_gst_template(
+                company,
+                _value(self, "taxes_and_charges", None),
+            )
             if gst_template:
                 _set_value(self, "taxes_and_charges", gst_template)
                 self.set("taxes", [])
@@ -1299,7 +1457,10 @@ class PurchaseInvoice(DocumentController):
                 self.set("taxes", [])
                 for row in manual_taxes:
                     self.append("taxes", row)
-                logger.debug("before_validate: no GST template found for company=%s", company)
+                logger.warning(
+                    "before_validate: GST requested but no purchase template for company=%s",
+                    company,
+                )
         else:
             _set_value(self, "taxes_and_charges", "")
             self.set("taxes", [])
