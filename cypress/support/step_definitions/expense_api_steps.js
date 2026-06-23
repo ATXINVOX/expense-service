@@ -1130,7 +1130,7 @@ function ensureAdministratorTenantContext() {
   return cy
     .request({
       method: "GET",
-      url: `${apiBase}/api/method/invoice_tracker.api.get_invoice_dashboard?preset=last_month&recent_limit=1`,
+      url: `${apiBase}/api/method/invoice_tracker.api.get_invoice_dashboard?period=month&recent_limit=1`,
       headers,
       failOnStatusCode: false,
     })
@@ -1163,7 +1163,7 @@ function ensureAdministratorTenantContext() {
 
           return cy.request({
             method: "GET",
-            url: `${apiBase}/api/method/invoice_tracker.api.get_invoice_dashboard?preset=last_month&recent_limit=1`,
+            url: `${apiBase}/api/method/invoice_tracker.api.get_invoice_dashboard?period=month&recent_limit=1`,
             headers,
             failOnStatusCode: false,
           });
@@ -1307,7 +1307,7 @@ Given("required invoice test data exists", () => {
     // Prefer the same company context used by invoice dashboard itself.
     cy.request({
       method: "GET",
-      url: `${base}/api/method/invoice_tracker.api.get_invoice_dashboard?preset=last_week&recent_limit=1`,
+      url: `${base}/api/method/invoice_tracker.api.get_invoice_dashboard?period=month&recent_limit=1`,
       headers: apiAuthHeaders(token),
       failOnStatusCode: false,
     }).then((dashRes) => {
