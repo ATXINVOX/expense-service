@@ -690,11 +690,84 @@ def test_dashboard_summary_preset_month_cashflow_and_trend():
 
 
 def test_dashboard_summary_invalid_period_raises():
-    sys.modules["flask"].request.args = _FakeArgs({"period": "quarter"})
+    sys.modules["flask"].request.args = _FakeArgs({"period": "week"})
     mock_frappe.defaults = MagicMock()
     mock_frappe.defaults.get_user_default.return_value = "Acme Pty Ltd"
     with pytest.raises(RuntimeError, match="period must be one of"):
         get_dashboard_summary("test_user")
+
+
+def test_dashboard_summary_preset_quarter_cashflow_buckets():
+    fixed_today = date(2026, 5, 15)
+    sys.modules["flask"].request.args = _FakeArgs({"period": "quarter"})
+    mock_frappe.defaults = MagicMock()
+    mock_frappe.defaults.get_user_default.return_value = "Acme Pty Ltd"
+    mock_frappe.db.get_value.return_value = "AUD"
+
+    with patch("expense_tracker.api.date", _date_class_with_fixed_today(fixed_today)), patch(
+        "expense_tracker.api._get_frappe_today", return_value=fixed_today
+    ):
+        mock_app.tenant_db.get_all.side_effect = [
+            [
+                {
+                    "name": "PI-1",
+                    "grand_total": 80.0,
+                    "total_taxes_and_charges": 8.0,
+                    "posting_date": date(2026, 4, 10),
+                },
+                {
+                    "name": "PI-2",
+                    "grand_total": 20.0,
+                    "total_taxes_and_charges": 2.0,
+                    "posting_date": date(2026, 5, 5),
+                },
+            ],
+            [{"item_group": "Fuel", "amount": 100.0}],
+            [{"grand_total": 40.0}],
+        ]
+        result = get_dashboard_summary("test_user")
+
+    assert result["preset"] == "quarter"
+    assert result["compare_period_label"] == "vs last quarter"
+    assert [b["label"] for b in result["cashflow"]] == ["Apr", "May", "Jun"]
+    assert result["cashflow"][0]["amount"] == 80.0
+    assert result["cashflow"][1]["amount"] == 20.0
+
+
+def test_dashboard_summary_preset_year_uses_quarter_buckets():
+    fixed_today = date(2026, 8, 20)
+    sys.modules["flask"].request.args = _FakeArgs({"period": "year"})
+    mock_frappe.defaults = MagicMock()
+    mock_frappe.defaults.get_user_default.return_value = "Acme Pty Ltd"
+    mock_frappe.db.get_value.return_value = "AUD"
+
+    with patch("expense_tracker.api.date", _date_class_with_fixed_today(fixed_today)), patch(
+        "expense_tracker.api._get_frappe_today", return_value=fixed_today
+    ):
+        mock_app.tenant_db.get_all.side_effect = [
+            [
+                {
+                    "name": "PI-1",
+                    "grand_total": 50.0,
+                    "total_taxes_and_charges": 5.0,
+                    "posting_date": date(2026, 2, 10),
+                },
+                {
+                    "name": "PI-2",
+                    "grand_total": 70.0,
+                    "total_taxes_and_charges": 7.0,
+                    "posting_date": date(2026, 7, 1),
+                },
+            ],
+            [{"item_group": "Fuel", "amount": 120.0}],
+            [{"grand_total": 30.0}],
+        ]
+        result = get_dashboard_summary("test_user")
+
+    assert result["preset"] == "year"
+    assert [b["label"] for b in result["cashflow"]] == ["Q1", "Q2", "Q3", "Q4"]
+    assert result["cashflow"][0]["amount"] == 50.0
+    assert result["cashflow"][2]["amount"] == 70.0
 
 
 def test_dashboard_summary_custom_range_cashflow_and_trend():
@@ -737,34 +810,12 @@ def test_dashboard_summary_custom_period_param_requires_dates():
         get_dashboard_summary("test_user")
 
 
-def test_dashboard_summary_preset_week_uppercase_period():
-    fixed_today = date(2026, 5, 7)
+def test_dashboard_summary_preset_week_rejected():
     sys.modules["flask"].request.args = _FakeArgs({"period": "WEEK"})
     mock_frappe.defaults = MagicMock()
     mock_frappe.defaults.get_user_default.return_value = "Acme Pty Ltd"
-    mock_frappe.db.get_value.return_value = "AUD"
-
-    with patch("expense_tracker.api.date", _date_class_with_fixed_today(fixed_today)), patch(
-        "expense_tracker.api._get_frappe_today", return_value=fixed_today
-    ):
-        mock_app.db.get_all.side_effect = [
-            [
-                {
-                    "name": "PI-1",
-                    "grand_total": 50.0,
-                    "total_taxes_and_charges": 5.0,
-                    "posting_date": fixed_today,
-                },
-            ],
-            [{"item_group": "Fuel", "amount": 50.0}],
-            [{"grand_total": 10.0}],
-        ]
-        result = get_dashboard_summary("test_user")
-
-    assert result["preset"] == "week"
-    assert len(result["cashflow"]) == 7
-    assert "breakdown_top4" in result
-    assert len(result["breakdown_top4"]) == 1
+    with pytest.raises(RuntimeError, match="period must be one of"):
+        get_dashboard_summary("test_user")
 
 
 def test_dashboard_summary_preset_breakdown_top4_merges_remainder_as_others():

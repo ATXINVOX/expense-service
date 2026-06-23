@@ -23,10 +23,10 @@ Feature: Expense dashboard summary API contract
       | breakdown        |
       | recent_expenses  |
 
-  Scenario: Week preset returns trend and weekly cashflow buckets
-    When I GET the dashboard summary with query "period=week"
+  Scenario: Month preset returns week segments
+    When I GET the dashboard summary with query "period=month"
     Then the expense API last response status should be 200
-    And the dashboard preset should be "week"
+    And the dashboard preset should be "month"
     And the dashboard response should include keys:
       | compare_period_label |
       | trend_pct            |
@@ -37,25 +37,25 @@ Feature: Expense dashboard summary API contract
       | cashflow             |
       | cashflow_stats       |
       | breakdown_top4       |
-    And the dashboard cashflow should have bucket count 7
+    And the dashboard cashflow should have bucket count 4
     And each dashboard breakdown row should include pct and color
 
-  Scenario: Month preset returns month segments
-    When I GET the dashboard summary with query "period=month"
+  Scenario: Quarter preset returns quarter month buckets
+    When I GET the dashboard summary with query "period=quarter"
     Then the expense API last response status should be 200
-    And the dashboard preset should be "month"
-    And the dashboard cashflow should have bucket count 4
+    And the dashboard preset should be "quarter"
+    And the dashboard cashflow should have bucket count 3
 
-  Scenario: Year preset returns monthly buckets
+  Scenario: Year preset returns quarterly buckets
     When I GET the dashboard summary with query "period=year"
     Then the expense API last response status should be 200
     And the dashboard preset should be "year"
-    And the dashboard cashflow should have bucket count 12
+    And the dashboard cashflow should have bucket count 4
 
   Scenario: Period is normalized case-insensitively
-    When I GET the dashboard summary with query "period=WEEK"
+    When I GET the dashboard summary with query "period=MONTH"
     Then the expense API last response status should be 200
-    And the dashboard preset should be "week"
+    And the dashboard preset should be "month"
 
   Scenario: Empty period stays in legacy mode
     When I GET the dashboard summary with query "period="
@@ -65,5 +65,5 @@ Feature: Expense dashboard summary API contract
       | cashflow |
 
   Scenario: Invalid period returns validation error
-    When I GET the dashboard summary with query "period=quarter"
+    When I GET the dashboard summary with query "period=week"
     Then the expense API last response status should be one of "400, 417, 422"

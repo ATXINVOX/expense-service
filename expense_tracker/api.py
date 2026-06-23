@@ -199,20 +199,45 @@ def _dashboard_prior_year_ytd_bounds(d: date):
     return date(y, 1, 1), date(y, d.month, dom)
 
 
+def _quarter_start_month(month: int) -> int:
+    return ((month - 1) // 3) * 3 + 1
+
+
+def _quarter_start_date(d: date) -> date:
+    return date(d.year, _quarter_start_month(d.month), 1)
+
+
+def _dashboard_quarter_qtd_bounds(d: date):
+    return _quarter_start_date(d), d
+
+
+def _dashboard_prior_quarter_qtd_bounds(d: date):
+    q_start, q_end = _dashboard_quarter_qtd_bounds(d)
+    prev_q_last = q_start - timedelta(days=1)
+    prev_start = _quarter_start_date(prev_q_last)
+    days_into = (q_end - q_start).days
+    prev_end = min(prev_start + timedelta(days=days_into), prev_q_last)
+    return prev_start, prev_end
+
+
+def _quarter_number(d: date) -> int:
+    return (d.month - 1) // 3 + 1
+
+
 def _resolve_dashboard_period(preset: str, today: date):
-    """Main window, comparison window, and UI labels (preset is week|month|year)."""
+    """Main window, comparison window, and UI labels (preset is month|quarter|year)."""
     p = (preset or "").strip().lower()
-    if p == "week":
-        fd, td = _dashboard_week_bounds(today)
-        pfd, ptd = _dashboard_prior_week_bounds(today)
-        label = f"Week of {fd.strftime('%d %b %Y')}"
-        cmp_label = "vs last week"
-        return fd, td, pfd, ptd, label, cmp_label
     if p == "month":
         fd, td = _dashboard_month_mtd_bounds(today)
         pfd, ptd = _dashboard_prior_month_mtd_bounds(today)
         label = td.strftime("%B %Y")
         cmp_label = "vs last month"
+        return fd, td, pfd, ptd, label, cmp_label
+    if p == "quarter":
+        fd, td = _dashboard_quarter_qtd_bounds(today)
+        pfd, ptd = _dashboard_prior_quarter_qtd_bounds(today)
+        label = f"Q{_quarter_number(today)} {today.year}"
+        cmp_label = "vs last quarter"
         return fd, td, pfd, ptd, label, cmp_label
     if p == "year":
         fd, td = _dashboard_year_ytd_bounds(today)
@@ -273,15 +298,34 @@ def _cashflow_month_week_segments(rows, range_start: date, range_end: date) -> l
     return [{"label": labels[i], "amount": round(buckets[i], 2)} for i in range(4)]
 
 
-def _cashflow_year_months(rows, year: int, range_end: date) -> list[dict]:
+def _quarter_month_labels(quarter_start_month: int) -> list[str]:
     months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-    buckets = [0.0] * 12
+    return [months[quarter_start_month - 1 + i] for i in range(3)]
+
+
+def _cashflow_quarter_months(rows, range_start: date, range_end: date) -> list[dict]:
+    q_start_month = _quarter_start_month(range_start.month)
+    labels = _quarter_month_labels(q_start_month)
+    buckets = [0.0, 0.0, 0.0]
+    for row in rows or []:
+        pd = _parse_posting_date_value(row.get("posting_date"))
+        if not pd or pd < range_start or pd > range_end:
+            continue
+        idx = pd.month - q_start_month
+        if 0 <= idx <= 2:
+            buckets[idx] += _as_number(row.get("grand_total"))
+    return [{"label": labels[i], "amount": round(buckets[i], 2)} for i in range(3)]
+
+
+def _cashflow_year_quarters(rows, year: int, range_end: date) -> list[dict]:
+    labels = ["Q1", "Q2", "Q3", "Q4"]
+    buckets = [0.0, 0.0, 0.0, 0.0]
     for row in rows or []:
         pd = _parse_posting_date_value(row.get("posting_date"))
         if not pd or pd.year != year or pd > range_end:
             continue
-        buckets[pd.month - 1] += _as_number(row.get("grand_total"))
-    return [{"label": months[i], "amount": round(buckets[i], 2)} for i in range(12)]
+        buckets[(pd.month - 1) // 3] += _as_number(row.get("grand_total"))
+    return [{"label": labels[i], "amount": round(buckets[i], 2)} for i in range(4)]
 
 
 def _cashflow_daily_range(rows, range_start: date, range_end: date) -> list[dict]:
@@ -329,7 +373,7 @@ def _cashflow_custom_range(rows, range_start: date, range_end: date) -> list[dic
     if span <= 31:
         return _cashflow_month_week_segments(rows, range_start, range_end)
     if range_start.year == range_end.year:
-        return _cashflow_year_months(rows, range_start.year, range_end)
+        return _cashflow_year_quarters(rows, range_start.year, range_end)
     return _cashflow_monthly_range(rows, range_start, range_end)
 
 
@@ -1219,11 +1263,11 @@ def get_dashboard_summary(user, from_date=None, to_date=None):
     Without ``period``: legacy month-to-date (1st of month → today) via ``from_date`` /
     ``to_date`` defaults.
 
-    With ``GET ... ?period=week|month|year``: preset windows, trend vs prior window,
+    With ``GET ... ?period=month|quarter|year``: preset windows, trend vs prior window,
     cashflow buckets for charts, ``pct`` / ``color`` on breakdown rows.
 
-    Custom range: ``period=custom`` with ``from_date`` and ``to_date``, or both dates
-    without ``period``. Returns the same enriched payload (cashflow, trend, dates).
+    Monthly cashflow uses W1–W4; quarterly uses the three months in the quarter;
+    yearly uses Q1–Q4.
     """
     from flask import request
 
@@ -1241,10 +1285,10 @@ def get_dashboard_summary(user, from_date=None, to_date=None):
     from_raw = request.args.get("from_date") or from_date
     to_raw = request.args.get("to_date") or to_date
 
-    if period_preset and period_preset not in ("week", "month", "year", "custom"):
-        frappe.throw("period must be one of: week, month, year, custom")
+    if period_preset and period_preset not in ("month", "quarter", "year", "custom"):
+        frappe.throw("period must be one of: month, quarter, year, custom")
 
-    use_preset = period_preset in ("week", "month", "year")
+    use_preset = period_preset in ("month", "quarter", "year")
     use_custom = period_preset == "custom" or (
         not use_preset and from_raw and to_raw
     )
@@ -1377,13 +1421,12 @@ def get_dashboard_summary(user, from_date=None, to_date=None):
             color = _CATEGORY_COLOR_PALETTE[idx % len(_CATEGORY_COLOR_PALETTE)]
             enriched_breakdown.append({**row, "pct": pct, "color": color})
 
-        if period_preset == "week":
-            week_start, _ = _dashboard_week_bounds(from_date)
-            cashflow = _cashflow_week_series(invoices, week_start)
-        elif period_preset == "month":
+        if period_preset == "month":
             cashflow = _cashflow_month_week_segments(invoices, from_date, to_date)
+        elif period_preset == "quarter":
+            cashflow = _cashflow_quarter_months(invoices, from_date, to_date)
         elif period_preset == "year":
-            cashflow = _cashflow_year_months(invoices, from_date.year, to_date)
+            cashflow = _cashflow_year_quarters(invoices, from_date.year, to_date)
         else:
             cashflow = _cashflow_custom_range(invoices, from_date, to_date)
 
