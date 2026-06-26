@@ -10,7 +10,7 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: atxinvox-org-runner
     permissions:
       contents: read
       packages: read
@@ -39,7 +39,7 @@ jobs:
 
   integration-test:
     needs: test
-    runs-on: ubuntu-latest
+    runs-on: atxinvox-org-runner
     env:
       # Consistent volume mount path for all docker compose calls in this job.
       # The lib is extracted from the GHCR image into /tmp/ms-src in the
@@ -112,7 +112,8 @@ jobs:
           if [ "$HAS_COMPANY" = "0" ]; then
             echo "No Company — bootstrapping ERPNext test data"
             docker compose -f docker-compose.integration.yml exec -T dev-central-site \
-              bash -c "cd $BENCH && bench --site dev.localhost execute erpnext.setup.utils.before_tests"
+              env FRAPPE_SITE=dev.localhost FRAPPE_SITES_PATH="$BENCH/sites" \
+              "$PYTHON" /mnt/lib/scripts/bootstrap_integration_site.py
           fi
 
       - name: Create test company with full ERPNext chart of accounts
@@ -297,7 +298,7 @@ jobs:
 
   build:
     needs: [test, integration-test]
-    runs-on: ubuntu-latest
+    runs-on: atxinvox-org-runner
     permissions:
       contents: read
       packages: write

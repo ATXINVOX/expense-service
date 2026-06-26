@@ -12,6 +12,8 @@ services:
       # CI sets MS_LIB_PATH=./frappe-microservice-lib (in-workspace checkout).
       # Local dev leaves MS_LIB_PATH unset, falling back to the sibling repo.
       - ${MS_LIB_PATH:-../frappe-microservice-lib}:/mnt/lib
+    environment:
+      SERVICE_PATH: /mnt/expense
 
   cypress:
     image: cypress/included:13.6.0
