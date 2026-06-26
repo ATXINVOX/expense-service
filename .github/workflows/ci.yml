@@ -41,10 +41,8 @@ jobs:
     needs: test
     runs-on: atxinvox-org-runner
     env:
-      # Consistent volume mount path for all docker compose calls in this job.
-      # The lib is extracted from the GHCR image into /tmp/ms-src in the
-      # "Extract frappe-microservice" step and mounted as /mnt/lib.
-      MS_LIB_PATH: /tmp/ms-src
+      # Workspace path is bind-mountable by the host Docker daemon on org runners.
+      MS_LIB_PATH: ${{ github.workspace }}/ms-src
     steps:
       - name: Checkout expense-service
         uses: actions/checkout@v4
@@ -64,14 +62,14 @@ jobs:
           # Create (don't run) a container from the lib image to copy files out.
           # GITHUB_TOKEN can pull packages from the same org without extra permissions.
           docker create --name ms-extract ghcr.io/atxinvox/frappe-microservice-lib:latest
-          mkdir -p /tmp/ms-src
+          mkdir -p ${{ env.MS_LIB_PATH }}
           docker cp ms-extract:/opt/venv/lib/python3.14/site-packages/frappe_microservice \
-            /tmp/ms-src/frappe_microservice
+            ${{ env.MS_LIB_PATH }}/frappe_microservice
           docker rm ms-extract
           # Write setup files via Python to avoid heredoc indentation problems.
           python3 - << 'PYEOF'
-          import pathlib
-          base = pathlib.Path("/tmp/ms-src")
+          import os, pathlib
+          base = pathlib.Path(os.environ["MS_LIB_PATH"])
           (base / "setup.cfg").write_text(
               "[metadata]\nname = frappe-microservice\nversion = 1.4.0\n"
               "[options]\npackages = find:\ninstall_requires =\n"
@@ -81,7 +79,7 @@ jobs:
           PYEOF
 
       - name: Start integration container
-        run: docker compose -f docker-compose.integration.yml up -d
+        run: docker compose -f docker-compose.integration.yml up -d --force-recreate
 
       - name: Wait for Frappe site
         run: |
