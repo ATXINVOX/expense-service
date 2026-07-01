@@ -1892,6 +1892,37 @@ def test_update_purchase_invoice_normalizes_dates_before_save(monkeypatch):
     mock_app.tenant_db.hooks.run_hooks.assert_any_call(mock_doc, "validate")
 
 
+def test_update_purchase_invoice_submit_flag_calls_submit_helper(monkeypatch):
+    sys.modules["flask"].request.get_json.return_value = {"submit": 1}
+    mock_frappe.defaults = MagicMock()
+    mock_frappe.defaults.get_user_default.return_value = "Acme Pty Ltd"
+    mock_frappe.db.get_value.return_value = {"docstatus": 0, "company": "Acme Pty Ltd"}
+
+    submitted_doc = MagicMock()
+    submitted_doc.name = "ACC-PINV-2026-00212"
+    submitted_doc.docstatus = 1
+    submitted_doc.status = "Paid"
+
+    submit_mock = MagicMock(return_value=submitted_doc)
+    monkeypatch.setattr("expense_tracker.api._submit_purchase_invoice_by_name", submit_mock)
+    monkeypatch.setattr(
+        "expense_tracker.api._project_purchase_invoice_api",
+        lambda doc: {
+            "id": doc.name,
+            "name": doc.name,
+            "docstatus": doc.docstatus,
+            "status": "Paid",
+        },
+    )
+
+    result = update_purchase_invoice("user@example.com", "ACC-PINV-2026-00212")
+
+    submit_mock.assert_called_once_with("user@example.com", "ACC-PINV-2026-00212")
+    assert result["success"] is True
+    assert result["status"] == "Paid"
+    assert result["docstatus"] == 1
+
+
 # ── delete_purchase_invoice (resource DELETE: cancel if submitted, then delete) ─
 
 
