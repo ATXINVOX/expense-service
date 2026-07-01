@@ -281,7 +281,13 @@ def compute_simpler_bas_from_gl(
     }
 
 
-def find_or_create_bas_report(company: str, from_date: date, to_date: date) -> str:
+def find_or_create_bas_report(
+    company: str,
+    from_date: date,
+    to_date: date,
+    *,
+    today: Optional[date] = None,
+) -> str:
     """Return AU BAS Report name for the company period (create when missing).
 
     Dates are normalised to the company's Monthly or Quarterly BAS cycle before
@@ -294,9 +300,10 @@ def find_or_create_bas_report(company: str, from_date: date, to_date: date) -> s
             frappe.ValidationError,
         )
 
-    norm_from, norm_to = normalize_bas_report_dates(company, from_date, to_date)
+    today = today or date.today()
+    norm_from, norm_to = normalize_bas_report_dates(company, from_date, to_date, today=today)
 
-    _validate_bas_period_in_financial_year(norm_from, norm_to, date.today())
+    _validate_bas_period_in_financial_year(norm_from, norm_to, today)
 
     existing = find_bas_report_name_exact(company, norm_from, norm_to)
     if existing:
@@ -350,8 +357,11 @@ def normalize_bas_report_dates(
     company: str,
     from_date: date,
     to_date: date,
+    *,
+    today: Optional[date] = None,
 ) -> Tuple[date, date]:
     """Snap to calendar month or AU quarter per company BAS settings."""
+    today = today or date.today()
     reporting_period = get_company_bas_reporting_period(company)
     anchor = from_date if from_date <= to_date else to_date
 
@@ -359,7 +369,7 @@ def normalize_bas_report_dates(
         month_start = date(anchor.year, anchor.month, 1)
         last_day = calendar.monthrange(anchor.year, anchor.month)[1]
         month_end = date(anchor.year, anchor.month, last_day)
-        _validate_bas_period_in_financial_year(month_start, month_end, date.today())
+        _validate_bas_period_in_financial_year(month_start, month_end, today)
         return month_start, month_end
 
     try:
@@ -370,13 +380,13 @@ def normalize_bas_report_dates(
             quarter_end = _safe_date(result[1])
             if quarter_start and quarter_end:
                 norm_from, norm_to = quarter_start, quarter_end
-                _validate_bas_period_in_financial_year(norm_from, norm_to, date.today())
+                _validate_bas_period_in_financial_year(norm_from, norm_to, today)
                 return norm_from, norm_to
     except Exception:
         pass
 
     norm_from, norm_to = _quarter_bounds(anchor)
-    _validate_bas_period_in_financial_year(norm_from, norm_to, date.today())
+    _validate_bas_period_in_financial_year(norm_from, norm_to, today)
     return norm_from, norm_to
 
 
@@ -556,7 +566,9 @@ def build_bas_summary(
 
     if _can_load_get_gst() and _table_exists("AU BAS Report"):
         try:
-            report_name = find_or_create_bas_report(company, from_date, to_date)
+            report_name = find_or_create_bas_report(
+                company, from_date, to_date, today=today
+            )
             doc = refresh_bas_report(report_name)
             return serialize_bas_summary(
                 doc,

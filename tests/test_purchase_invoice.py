@@ -154,6 +154,7 @@ def reset_mocks():
     mock_app.db.exists.return_value = False
     mock_app.tenant_db.reset_mock()
     mock_frappe.db.reset_mock()
+    mock_frappe.db.get_value.side_effect = None
     mock_frappe.db.has_column = MagicMock(return_value=True)
     mock_frappe.get_all.reset_mock()
     mock_frappe.get_all.side_effect = None
@@ -175,7 +176,7 @@ def reset_mocks():
     mock_frappe.get_attr.side_effect = _frappe_get_attr_side_effect
 
 
-def _default_get_value(doctype, filters, field=None):
+def _default_get_value(doctype, filters, field=None, **kwargs):
     """Shared get_value mock used by most tests."""
     if doctype == "DefaultValue":
         # _resolve_company_from_user: no user default → fall back to doc company
