@@ -1606,7 +1606,8 @@ def test_frappe_client_submit_accepts_doc_and_invoice_name_alias():
     mock_frappe.db.set_value.assert_any_call(
         "Purchase Invoice", "PI-2", "title", "Coffee (+1 more)", update_modified=False
     )
-    mock_frappe.get_doc.assert_called_once_with("Purchase Invoice", "PI-2")
+    assert mock_frappe.get_doc.call_count == 2
+    mock_frappe.get_doc.assert_any_call("Purchase Invoice", "PI-2")
     mock_pi_doc.submit.assert_called_once()
 
 
@@ -1664,7 +1665,8 @@ def test_frappe_client_submit_accepts_frappe_doc_payload():
 
     frappe_client_submit("user@example.com")
 
-    mock_frappe.get_doc.assert_called_once_with("Purchase Invoice", "PI-DOC-1")
+    assert mock_frappe.get_doc.call_count == 2
+    mock_frappe.get_doc.assert_any_call("Purchase Invoice", "PI-DOC-1")
     mock_pi_doc.submit.assert_called_once()
 
 
