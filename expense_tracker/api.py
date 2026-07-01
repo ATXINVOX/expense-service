@@ -499,7 +499,10 @@ def _recent_expenses_from_rows(rows, limit: int = 10) -> list[dict]:
                 "name": row.get("name"),
                 "supplier": row.get("supplier"),
                 "posting_date": _fmt_api_date(row.get("posting_date")),
-                "status": row.get("status"),
+                "status": _expense_purchase_invoice_display_status(
+                    row.get("docstatus"),
+                    row.get("status"),
+                ),
                 "amount": _as_number(row.get("grand_total")),
                 "currency": row.get("currency"),
                 "remarks": row.get("remarks"),
@@ -508,6 +511,17 @@ def _recent_expenses_from_rows(rows, limit: int = 10) -> list[dict]:
             }
         )
     return out
+
+
+def _expense_purchase_invoice_display_status(docstatus, status) -> str:
+    """Invox mobile expenses are paid on submit — not tracked as unpaid supplier bills."""
+    ds = int(docstatus or 0)
+    if ds == 1:
+        return "Paid"
+    if ds == 2:
+        return "Cancelled"
+    label = (status or "").strip()
+    return label or "Draft"
 
 
 def _invoice_filters(company: str, from_date: date, to_date: date):
@@ -753,6 +767,151 @@ def _log_pi_currency_debug(pinv_name: str) -> None:
     )
 
 
+def _parse_purchase_invoice_submit_flag(data: dict) -> tuple[dict, bool]:
+    """Strip ``submit`` from PUT body; truthy values request draft → submitted transition."""
+    payload = dict(data or {})
+    submit = payload.pop("submit", None)
+    should_submit = submit in (1, True, "1", "true", "True")
+    return payload, should_submit
+
+
+def _submit_purchase_invoice_by_name(user, name: str):
+    """Submit a draft Purchase Invoice, mark Paid, and return the reloaded document."""
+    name, err = _validate_name(name)
+    if err:
+        return err
+
+    company = _resolve_company()
+    if not company:
+        return _build_error(
+            "Company is required. No company found for the current user.",
+            400,
+            "ValidationError",
+        )
+
+    row = frappe.db.get_value(
+        "Purchase Invoice",
+        name,
+        [
+            "docstatus",
+            "company",
+            "supplier",
+            "expense_item_name",
+            "expense_items_count",
+            "remarks",
+        ],
+        as_dict=True,
+    )
+    if not row:
+        logger.info("SUBMIT: not found name=%r user=%s", name, user)
+        return _build_error(
+            f"Purchase Invoice '{name}' not found",
+            404,
+            "DoesNotExistError",
+        )
+
+    inv_company = (row.get("company") or "").strip()
+    if inv_company and inv_company != company:
+        logger.warning(
+            "SUBMIT: permission denied name=%r user=%s company=%s", name, user, company
+        )
+        return _build_error(
+            "You do not have access to this expense",
+            403,
+            "PermissionError",
+        )
+
+    co = inv_company or company
+    if not inv_company:
+        frappe.db.set_value(
+            "Purchase Invoice",
+            name,
+            "company",
+            co,
+            update_modified=False,
+        )
+
+    docstatus = int(row.get("docstatus") or 0)
+    if docstatus != 0:
+        status_label = "Submitted" if docstatus == 1 else "Cancelled"
+        return _build_error(
+            f"Only draft expenses (docstatus 0) can be submitted. "
+            f"This invoice is {status_label} (docstatus={docstatus}).",
+            400,
+            "ValidationError",
+        )
+
+    _app_db().get_doc("Purchase Invoice", name, verify_tenant=True)
+
+    sup = (row.get("supplier") or "").strip() or None
+    ensure_purchase_invoice_submit_prereqs(co, sup)
+
+    expense_title = _expense_title(
+        row.get("expense_item_name"),
+        int(row.get("expense_items_count") or 0),
+        row.get("remarks"),
+    )
+    if expense_title and frappe.db.has_column("Purchase Invoice", "title"):
+        try:
+            frappe.db.set_value(
+                "Purchase Invoice",
+                name,
+                "title",
+                expense_title,
+                update_modified=False,
+            )
+            frappe.db.commit()
+            frappe.clear_document_cache("Purchase Invoice", name)
+        except Exception as exc:
+            logger.warning(
+                "SUBMIT: could not set Purchase Invoice title name=%r: %s",
+                name,
+                exc,
+            )
+            frappe.db.rollback()
+
+    doc = frappe.get_doc("Purchase Invoice", name)
+    doc.flags.ignore_permissions = True
+    ensure_purchase_invoice_item_defaults(doc)
+    ensure_purchase_invoice_submit_prereqs(co, sup, doc.get("posting_date"))
+    frappe.db.commit()
+    clear_account_cache_for_company(co)
+
+    if not doc.get("company"):
+        doc.company = co
+    if not doc.get("currency"):
+        doc.currency = _company_default_currency(co)
+    if not doc.get("conversion_rate"):
+        doc.conversion_rate = 1.0
+    try:
+        if hasattr(doc, "set_missing_values"):
+            doc.set_missing_values(for_validate=True)
+    except Exception as exc:
+        logger.info("SUBMIT: set_missing_values(for_validate=True) skipped: %s", exc)
+    normalize_purchase_invoice_payment_dates(doc)
+    clear_company_currency_cache(co)
+    cur_master = frappe.db.get_value("Company", co, "default_currency")
+    if not (cur_master and str(cur_master).strip()):
+        cur_master = _company_default_currency(co)
+    if not getattr(frappe.flags, "company_currency", None):
+        frappe.flags.company_currency = {}
+    frappe.flags.company_currency[co] = str(cur_master).strip()
+
+    doc.submit()
+    mark_purchase_invoice_paid_after_submit(doc.name)
+    frappe.db.commit()
+    doc.reload()
+    paid_status = _expense_purchase_invoice_display_status(doc.docstatus, doc.status)
+    logger.info(
+        "SUBMIT: success name=%s docstatus=%s status=%s user=%s",
+        name,
+        doc.docstatus,
+        paid_status,
+        user,
+    )
+    return doc
+
+
 @get_app().secure_route("/api/method/frappe.client.submit", methods=["POST"])
 def frappe_client_submit(user):
     """Submit a document on this site.
@@ -796,147 +955,16 @@ def frappe_client_submit(user):
         name_raw = name
 
         if doctype == "Purchase Invoice":
-            name, err = _validate_name(name)
-            if err:
-                return err
-
-            company = _resolve_company()
-            if not company:
-                return _build_error(
-                    "Company is required. No company found for the current user.",
-                    400,
-                    "ValidationError",
-                )
-
-            row = frappe.db.get_value(
-                "Purchase Invoice",
-                name,
-                [
-                    "docstatus",
-                    "company",
-                    "supplier",
-                    "expense_item_name",
-                    "expense_items_count",
-                    "remarks",
-                ],
-                as_dict=True,
-            )
-            if not row:
-                logger.info("SUBMIT: not found name=%r user=%s", name, user)
-                return _build_error(
-                    f"Purchase Invoice '{name}' not found",
-                    404,
-                    "DoesNotExistError",
-                )
-
-            inv_company = (row.get("company") or "").strip()
-            if inv_company and inv_company != company:
-                logger.warning(
-                    "SUBMIT: permission denied name=%r user=%s company=%s", name, user, company
-                )
-                return _build_error(
-                    "You do not have access to this expense",
-                    403,
-                    "PermissionError",
-                )
-
-            # ERPNext get_company_currency(doc.company) drives conversion_rate / exchange lookups.
-            # Empty PI.company → None "to" currency (AUD→None) even when Company master is AUD.
-            co = inv_company or company
-            if not inv_company:
-                frappe.db.set_value(
-                    "Purchase Invoice",
-                    name,
-                    "company",
-                    co,
-                    update_modified=False,
-                )
-
-            docstatus = int(row.get("docstatus") or 0)
-            if docstatus != 0:
-                status_label = "Submitted" if docstatus == 1 else "Cancelled"
-                return _build_error(
-                    f"Only draft expenses (docstatus 0) can be submitted. "
-                    f"This invoice is {status_label} (docstatus={docstatus}).",
-                    400,
-                    "ValidationError",
-                )
-
-            _app_db().get_doc("Purchase Invoice", name, verify_tenant=True)
             last_pi_submit = name
-
-            # Round-off CC, payable account_currency, supplier party currency — avoids
-            # submit-time validation errors on partially provisioned tenants.
-            sup = (row.get("supplier") or "").strip() or None
-            ensure_purchase_invoice_submit_prereqs(co, sup)
-
-            expense_title = _expense_title(
-                row.get("expense_item_name"),
-                int(row.get("expense_items_count") or 0),
-                row.get("remarks"),
-            )
-            # ERPNext / site schema may omit ``title`` on Purchase Invoice (no DB column).
-            if expense_title and frappe.db.has_column("Purchase Invoice", "title"):
-                try:
-                    frappe.db.set_value(
-                        "Purchase Invoice",
-                        name,
-                        "title",
-                        expense_title,
-                        update_modified=False,
-                    )
-                    frappe.db.commit()
-                    frappe.clear_document_cache("Purchase Invoice", name)
-                except Exception as exc:
-                    logger.warning(
-                        "SUBMIT: could not set Purchase Invoice title name=%r: %s",
-                        name,
-                        exc,
-                    )
-                    frappe.db.rollback()
-
-            doc = frappe.get_doc("Purchase Invoice", name)
-            doc.flags.ignore_permissions = True
-            ensure_purchase_invoice_item_defaults(doc)
-            ensure_purchase_invoice_submit_prereqs(co, sup, doc.get("posting_date"))
-            # Flush + drop stale Account cache (get_cached_value used for party_account_currency).
-            frappe.db.commit()
-            clear_account_cache_for_company(co)
-
-            # Defence-in-depth: ensure the PI itself has currency & conversion_rate
-            # and clear the company-currency cache one final time so ERPNext's
-            # get_company_currency() can never return None during GL entry creation.
-            if not doc.get("company"):
-                doc.company = co
-            if not doc.get("currency"):
-                doc.currency = _company_default_currency(co)
-            if not doc.get("conversion_rate"):
-                doc.conversion_rate = 1.0
-            try:
-                if hasattr(doc, "set_missing_values"):
-                    doc.set_missing_values(for_validate=True)
-            except Exception as exc:
-                logger.info("SUBMIT: set_missing_values(for_validate=True) skipped: %s", exc)
-            normalize_purchase_invoice_payment_dates(doc)
-            clear_company_currency_cache(co)
-            # Force request-level cache used by erpnext.get_company_currency() (must match doc.company).
-            cur_master = frappe.db.get_value("Company", co, "default_currency")
-            if not (cur_master and str(cur_master).strip()):
-                cur_master = _company_default_currency(co)
-            if not getattr(frappe.flags, "company_currency", None):
-                frappe.flags.company_currency = {}
-            frappe.flags.company_currency[co] = str(cur_master).strip()
-
-            doc.submit()
-            mark_purchase_invoice_paid_after_submit(doc.name)
-            frappe.db.commit()
-            doc.reload()
-            logger.info("SUBMIT: success name=%s docstatus=%s status=%s user=%s", name, doc.docstatus, doc.status, user)
+            doc = _submit_purchase_invoice_by_name(user, name)
+            if isinstance(doc, tuple):
+                return doc
+            paid_status = _expense_purchase_invoice_display_status(doc.docstatus, doc.status)
             return {
                 "success": True,
                 "docstatus": int(doc.docstatus),
                 "name": doc.name,
-                "status": doc.status or "Paid",
+                "status": paid_status,
             }
 
         _app_db().get_doc(doctype, name, verify_tenant=True)
@@ -1024,7 +1052,7 @@ def _project_purchase_invoice_api(doc):
         "items": items_out,
         "taxes_and_charges": d.get("taxes_and_charges"),
         "taxes": taxes_out,
-        "status": d.get("status"),
+        "status": _expense_purchase_invoice_display_status(d.get("docstatus"), d.get("status")),
         "docstatus": d.get("docstatus"),
         "grand_total": _to_api_float(d.get("grand_total")),
         "currency": d.get("currency"),
@@ -1080,7 +1108,7 @@ def create_purchase_invoice(user):
 
 
 def update_purchase_invoice(user, name):
-    """PUT /api/resource/Purchase Invoice/<name> — update draft expense fields."""
+    """PUT /api/resource/Purchase Invoice/<name> — update draft fields or submit via ``submit: 1``."""
     import urllib.parse
     from flask import request
 
@@ -1091,6 +1119,10 @@ def update_purchase_invoice(user, name):
 
     data = request.get_json(silent=True)
     if not data:
+        return {"error": "Request body required"}, 400
+
+    update_data, should_submit = _parse_purchase_invoice_submit_flag(data)
+    if not update_data and not should_submit:
         return {"error": "Request body required"}, 400
 
     try:
@@ -1133,26 +1165,37 @@ def update_purchase_invoice(user, name):
                 "ValidationError",
             )
 
-        doc = _app_db().get_doc("Purchase Invoice", nm, verify_tenant=True)
-        _app_db().hooks.run_hooks(doc, "before_update")
-        doc.update(data)
-        _app_db().hooks.run_hooks(doc, "before_validate")
+        if update_data:
+            doc = _app_db().get_doc("Purchase Invoice", nm, verify_tenant=True)
+            _app_db().hooks.run_hooks(doc, "before_update")
+            doc.update(update_data)
+            _app_db().hooks.run_hooks(doc, "before_validate")
 
-        try:
-            if hasattr(doc, "set_missing_values"):
-                doc.set_missing_values(for_validate=True)
-        except Exception as exc:
-            logger.info("PUT PI: set_missing_values(for_validate=True) skipped: %s", exc)
+            try:
+                if hasattr(doc, "set_missing_values"):
+                    doc.set_missing_values(for_validate=True)
+            except Exception as exc:
+                logger.info("PUT PI: set_missing_values(for_validate=True) skipped: %s", exc)
 
-        normalize_purchase_invoice_payment_dates(doc)
-        _app_db().hooks.run_hooks(doc, "validate")
-        normalize_purchase_invoice_payment_dates(doc)
+            normalize_purchase_invoice_payment_dates(doc)
+            _app_db().hooks.run_hooks(doc, "validate")
+            normalize_purchase_invoice_payment_dates(doc)
 
-        doc.flags.ignore_permissions = True
-        ensure_purchase_invoice_item_defaults(doc)
-        doc.save()
-        frappe.db.commit()
-        _app_db().hooks.run_hooks(doc, "after_update")
+            doc.flags.ignore_permissions = True
+            ensure_purchase_invoice_item_defaults(doc)
+            doc.save()
+            frappe.db.commit()
+            _app_db().hooks.run_hooks(doc, "after_update")
+
+        if should_submit:
+            submitted = _submit_purchase_invoice_by_name(user, nm)
+            if isinstance(submitted, tuple):
+                return submitted
+            doc = submitted
+        elif update_data:
+            doc = _app_db().get_doc("Purchase Invoice", nm, verify_tenant=True)
+        else:
+            return _build_error("Nothing to update", 400, "ValidationError")
 
         out = _project_purchase_invoice_api(doc)
         out["success"] = True

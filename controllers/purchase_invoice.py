@@ -1168,54 +1168,61 @@ def mark_purchase_invoice_paid_after_submit(purchase_invoice_name: str) -> None:
         ["docstatus", "status", "outstanding_amount", "company", "posting_date"],
         as_dict=True,
     )
-    if not inv or int(inv.get("docstatus") or 0) != 1:
+    if not inv:
+        return
+    docstatus = int(inv.get("docstatus") or 0)
+    if docstatus != 1:
+        try:
+            doc = frappe.get_doc("Purchase Invoice", purchase_invoice_name)
+            docstatus = int(doc.docstatus or 0)
+        except Exception:
+            return
+    if docstatus != 1:
         return
     if (inv.get("status") or "").strip() == "Paid":
         return
 
     outstanding = float(inv.get("outstanding_amount") or 0)
-    if outstanding <= 0:
-        _set_purchase_invoice_status_paid(purchase_invoice_name)
-        return
+    if outstanding > 0:
+        company = inv.get("company")
+        paid_from = _resolve_paid_from_account(company)
+        if not paid_from:
+            logger.warning(
+                "mark_purchase_invoice_paid_after_submit: no paid_from for company=%s pi=%s",
+                company,
+                purchase_invoice_name,
+            )
+        else:
+            try:
+                from erpnext.accounts.doctype.payment_entry.payment_entry import get_payment_entry
 
-    company = inv.get("company")
-    paid_from = _resolve_paid_from_account(company)
-    if not paid_from:
-        logger.warning(
-            "mark_purchase_invoice_paid_after_submit: no paid_from for company=%s pi=%s",
-            company,
-            purchase_invoice_name,
-        )
-        _set_purchase_invoice_status_paid(purchase_invoice_name)
-        return
+                pe = get_payment_entry(
+                    "Purchase Invoice",
+                    purchase_invoice_name,
+                    bank_account=paid_from,
+                )
+                pe.flags.ignore_permissions = True
+                if not pe.get("paid_from"):
+                    pe.paid_from = paid_from
+                if not pe.get("mode_of_payment"):
+                    pe.mode_of_payment = _resolve_mode_of_payment(company, paid_from) or "Cash"
+                if not pe.get("reference_no"):
+                    pe.reference_no = purchase_invoice_name
+                posting_date = inv.get("posting_date")
+                if posting_date and not pe.get("reference_date"):
+                    pe.reference_date = posting_date
+                pe.insert(ignore_permissions=True)
+                pe.submit()
+            except Exception as exc:
+                logger.warning(
+                    "mark_purchase_invoice_paid_after_submit: Payment Entry failed pi=%s: %s",
+                    purchase_invoice_name,
+                    exc,
+                )
 
-    try:
-        from erpnext.accounts.doctype.payment_entry.payment_entry import get_payment_entry
-
-        pe = get_payment_entry(
-            "Purchase Invoice",
-            purchase_invoice_name,
-            bank_account=paid_from,
-        )
-        pe.flags.ignore_permissions = True
-        if not pe.get("paid_from"):
-            pe.paid_from = paid_from
-        if not pe.get("mode_of_payment"):
-            pe.mode_of_payment = _resolve_mode_of_payment(company, paid_from) or "Cash"
-        if not pe.get("reference_no"):
-            pe.reference_no = purchase_invoice_name
-        posting_date = inv.get("posting_date")
-        if posting_date and not pe.get("reference_date"):
-            pe.reference_date = posting_date
-        pe.insert(ignore_permissions=True)
-        pe.submit()
-    except Exception as exc:
-        logger.warning(
-            "mark_purchase_invoice_paid_after_submit: Payment Entry failed pi=%s: %s",
-            purchase_invoice_name,
-            exc,
-        )
-        _set_purchase_invoice_status_paid(purchase_invoice_name)
+    # Mobile expenses are always paid on submit — ERPNext may still leave status as Unpaid
+    # when Payment Entry succeeds without updating the invoice row.
+    _set_purchase_invoice_status_paid(purchase_invoice_name)
 
 
 def ensure_purchase_invoice_submit_prereqs(
