@@ -1,5 +1,9 @@
 name: CI/CD Pipeline
 
+# Private image ghcr.io/atxinvox/frappe-microservice-lib:
+# - On ATXINVOX repos with package access, GITHUB_TOKEN alone may work.
+# - Otherwise set org/repo secrets: GHCR_PAT or PAT_TOKEN, and GHCR_USERNAME.
+
 on:
   push:
     branches: [main, develop, "version-*"]
@@ -10,15 +14,15 @@ on:
 
 jobs:
   test:
-    runs-on: atxinvox-org-runner
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: read
     container:
       image: ghcr.io/atxinvox/frappe-microservice-lib:latest
       credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+        username: ${{ secrets.GHCR_USERNAME || github.actor }}
+        password: ${{ secrets.GHCR_PAT || secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -39,9 +43,12 @@ jobs:
 
   integration-test:
     needs: test
-    runs-on: atxinvox-org-runner
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
     env:
-      # Workspace path is bind-mountable by the host Docker daemon on org runners.
+      # Workspace path is bind-mountable by the host Docker daemon on GitHub-hosted runners.
       MS_LIB_PATH: ${{ github.workspace }}/ms-src
     steps:
       - name: Checkout expense-service
@@ -55,7 +62,10 @@ jobs:
           docker compose version
 
       - name: Log in to GHCR
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+        env:
+          GHCR_PASS: ${{ secrets.GHCR_PAT || secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ secrets.GHCR_USERNAME || github.actor }}
+        run: echo "$GHCR_PASS" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
 
       - name: Extract frappe-microservice from published image
         run: |
@@ -303,7 +313,7 @@ jobs:
 
   build:
     needs: [test, integration-test]
-    runs-on: atxinvox-org-runner
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
