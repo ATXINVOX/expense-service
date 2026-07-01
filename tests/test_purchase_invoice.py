@@ -124,6 +124,7 @@ if "flask" not in sys.modules:
 from controllers.purchase_invoice import (
     PurchaseInvoice,
     _expense_title,
+    mark_purchase_invoice_paid_after_submit,
     normalize_purchase_invoice_payment_dates,
 )
 from expense_tracker.api import (
@@ -1460,6 +1461,85 @@ def test_normalize_purchase_invoice_payment_dates_aligns_payment_schedule():
     assert doc.payment_schedule[0]["due_date"] == "2026-07-15"
 
 
+def test_mark_purchase_invoice_paid_after_submit_skips_when_already_paid():
+    mock_frappe.db.get_value.return_value = {
+        "docstatus": 1,
+        "status": "Paid",
+        "outstanding_amount": 0,
+        "company": "Acme Pty Ltd",
+        "posting_date": date(2026, 7, 1),
+    }
+
+    mark_purchase_invoice_paid_after_submit("ACC-PINV-2026-00001")
+    mock_frappe.db.set_value.assert_not_called()
+
+
+def test_mark_purchase_invoice_paid_after_submit_creates_payment_entry():
+    mock_frappe.db.get_value.side_effect = [
+        {
+            "docstatus": 1,
+            "status": "Unpaid",
+            "outstanding_amount": 50.0,
+            "company": "Acme Pty Ltd",
+            "posting_date": date(2026, 7, 1),
+        },
+        0,
+    ]
+    mock_frappe.db.exists.return_value = True
+    mock_frappe.db.has_column.return_value = False
+    mock_frappe.get_all.return_value = [{"name": "Cash - ACME"}]
+
+    mock_pe = MagicMock()
+    mock_get_pe = MagicMock(return_value=mock_pe)
+
+    fake_pe_mod = ModuleType("erpnext.accounts.doctype.payment_entry.payment_entry")
+    fake_pe_mod.get_payment_entry = mock_get_pe
+    erpnext_modules = {
+        "erpnext": ModuleType("erpnext"),
+        "erpnext.accounts": ModuleType("erpnext.accounts"),
+        "erpnext.accounts.doctype": ModuleType("erpnext.accounts.doctype"),
+        "erpnext.accounts.doctype.payment_entry": ModuleType("erpnext.accounts.doctype.payment_entry"),
+        "erpnext.accounts.doctype.payment_entry.payment_entry": fake_pe_mod,
+    }
+    with patch.dict(sys.modules, erpnext_modules):
+        mark_purchase_invoice_paid_after_submit("ACC-PINV-2026-00001")
+
+    mock_get_pe.assert_called_once_with(
+        "Purchase Invoice",
+        "ACC-PINV-2026-00001",
+        bank_account="Cash - ACME",
+    )
+    mock_pe.insert.assert_called_once_with(ignore_permissions=True)
+    mock_pe.submit.assert_called_once_with()
+
+
+def test_mark_purchase_invoice_paid_after_submit_sets_status_when_no_cash_account():
+    mock_frappe.db.get_value.side_effect = None
+    mock_frappe.db.get_value.return_value = {
+        "docstatus": 1,
+        "status": "Unpaid",
+        "outstanding_amount": 25.0,
+        "company": "Acme Pty Ltd",
+        "posting_date": date(2026, 7, 1),
+    }
+    mock_frappe.db.exists.return_value = False
+    mock_frappe.db.has_column.return_value = False
+    mock_frappe.get_all.return_value = []
+
+    with patch(
+        "controllers.purchase_invoice._ensure_account_row",
+        return_value=None,
+    ):
+        mark_purchase_invoice_paid_after_submit("ACC-PINV-2026-00002")
+
+    paid_status_calls = [
+        c
+        for c in mock_frappe.db.set_value.call_args_list
+        if len(c[0]) >= 4 and c[0][2] == "status" and c[0][3] == "Paid"
+    ]
+    assert paid_status_calls, "expected status=Paid when no cash account is available"
+
+
 # ── frappe.client.submit wrapper (Purchase Invoice + tenant checks) ───────────
 
 
@@ -1480,20 +1560,26 @@ def test_frappe_client_submit_purchase_invoice_success():
     # frappe.get_doc("Purchase Invoice", name) returns a mock doc
     mock_pi_doc = MagicMock()
     mock_pi_doc.name = "ACC-PINV-2026-00001"
-    mock_pi_doc.status = "Submitted"
+    mock_pi_doc.status = "Paid"
     mock_pi_doc.docstatus = 1
     mock_frappe.get_doc.return_value = mock_pi_doc
 
-    result = frappe_client_submit("user@example.com")
+    with patch(
+        "expense_tracker.api.mark_purchase_invoice_paid_after_submit",
+    ) as mock_mark_paid:
+        result = frappe_client_submit("user@example.com")
 
     assert result["success"] is True
     assert result["name"] == "ACC-PINV-2026-00001"
     assert result["docstatus"] == 1
+    assert result["status"] == "Paid"
     mock_frappe.db.set_value.assert_any_call(
         "Purchase Invoice", "ACC-PINV-2026-00001", "title", "Fuel", update_modified=False
     )
     mock_frappe.get_doc.assert_called_once_with("Purchase Invoice", "ACC-PINV-2026-00001")
     mock_pi_doc.submit.assert_called_once()
+    mock_mark_paid.assert_called_once_with("ACC-PINV-2026-00001")
+    mock_pi_doc.reload.assert_called_once()
 
 
 def test_frappe_client_submit_accepts_doc_and_invoice_name_alias():

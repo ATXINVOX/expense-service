@@ -1088,6 +1088,136 @@ def normalize_purchase_invoice_payment_dates(doc) -> None:
             _set_value(row, "due_date", bill)
 
 
+def _resolve_paid_from_account(company: str) -> str | None:
+    """Ledger account (Cash/Bank) used as Payment Entry ``paid_from`` for mobile expenses."""
+    if not company:
+        return None
+
+    for field in ("default_bank_account", "default_cash_account"):
+        try:
+            if not frappe.db.has_column("Company", field):
+                continue
+        except Exception:
+            continue
+        account = frappe.db.get_value("Company", company, field)
+        if account and frappe.db.exists("Account", account):
+            if not frappe.db.get_value("Account", account, "is_group"):
+                return account
+
+    for account_type in ("Cash", "Bank"):
+        rows = frappe.get_all(
+            "Account",
+            filters={"company": company, "account_type": account_type, "is_group": 0},
+            fields=["name"],
+            limit=1,
+            order_by="name asc",
+        )
+        if rows:
+            return rows[0].get("name")
+
+    abbr = _company_abbr(company)
+    asset_root = f"Assets - {abbr}"
+    cash_name = f"Cash - {abbr}"
+    if not frappe.db.exists("Account", cash_name):
+        parent = asset_root if frappe.db.exists("Account", asset_root) else None
+        _ensure_account_row(
+            cash_name,
+            account_name="Cash",
+            company=company,
+            root_type="Asset",
+            report_type="Balance Sheet",
+            account_type="Cash",
+            is_group=0,
+            parent_account=parent,
+        )
+    return cash_name if frappe.db.exists("Account", cash_name) else None
+
+
+def _resolve_mode_of_payment(company: str, paid_from: str) -> str | None:
+    rows = frappe.get_all(
+        "Mode of Payment Account",
+        filters={"company": company, "default_account": paid_from},
+        fields=["parent"],
+        limit=1,
+    )
+    if rows:
+        return rows[0].get("parent")
+    if frappe.db.exists("Mode of Payment", "Cash"):
+        return "Cash"
+    return None
+
+
+def _set_purchase_invoice_status_paid(purchase_invoice_name: str) -> None:
+    frappe.db.set_value(
+        "Purchase Invoice",
+        purchase_invoice_name,
+        "status",
+        "Paid",
+        update_modified=False,
+    )
+
+
+def mark_purchase_invoice_paid_after_submit(purchase_invoice_name: str) -> None:
+    """Record supplier payment on submit — mobile expenses are treated as already paid."""
+    if not purchase_invoice_name:
+        return
+
+    inv = frappe.db.get_value(
+        "Purchase Invoice",
+        purchase_invoice_name,
+        ["docstatus", "status", "outstanding_amount", "company", "posting_date"],
+        as_dict=True,
+    )
+    if not inv or int(inv.get("docstatus") or 0) != 1:
+        return
+    if (inv.get("status") or "").strip() == "Paid":
+        return
+
+    outstanding = float(inv.get("outstanding_amount") or 0)
+    if outstanding <= 0:
+        _set_purchase_invoice_status_paid(purchase_invoice_name)
+        return
+
+    company = inv.get("company")
+    paid_from = _resolve_paid_from_account(company)
+    if not paid_from:
+        logger.warning(
+            "mark_purchase_invoice_paid_after_submit: no paid_from for company=%s pi=%s",
+            company,
+            purchase_invoice_name,
+        )
+        _set_purchase_invoice_status_paid(purchase_invoice_name)
+        return
+
+    try:
+        from erpnext.accounts.doctype.payment_entry.payment_entry import get_payment_entry
+
+        pe = get_payment_entry(
+            "Purchase Invoice",
+            purchase_invoice_name,
+            bank_account=paid_from,
+        )
+        pe.flags.ignore_permissions = True
+        if not pe.get("paid_from"):
+            pe.paid_from = paid_from
+        if not pe.get("mode_of_payment"):
+            pe.mode_of_payment = _resolve_mode_of_payment(company, paid_from) or "Cash"
+        if not pe.get("reference_no"):
+            pe.reference_no = purchase_invoice_name
+        posting_date = inv.get("posting_date")
+        if posting_date and not pe.get("reference_date"):
+            pe.reference_date = posting_date
+        pe.insert(ignore_permissions=True)
+        pe.submit()
+    except Exception as exc:
+        logger.warning(
+            "mark_purchase_invoice_paid_after_submit: Payment Entry failed pi=%s: %s",
+            purchase_invoice_name,
+            exc,
+        )
+        _set_purchase_invoice_status_paid(purchase_invoice_name)
+
+
 def ensure_purchase_invoice_submit_prereqs(
     company: str, supplier: str | None, posting_date=None,
 ) -> None:

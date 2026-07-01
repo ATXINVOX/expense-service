@@ -15,6 +15,7 @@ from controllers.purchase_invoice import (
     clear_company_currency_cache,
     ensure_purchase_invoice_item_defaults,
     ensure_purchase_invoice_submit_prereqs,
+    mark_purchase_invoice_paid_after_submit,
     normalize_purchase_invoice_payment_dates,
 )
 
@@ -927,10 +928,16 @@ def frappe_client_submit(user):
             frappe.flags.company_currency[co] = str(cur_master).strip()
 
             doc.submit()
+            mark_purchase_invoice_paid_after_submit(doc.name)
             frappe.db.commit()
-            logger.info("SUBMIT: success name=%s docstatus=%s user=%s", name, doc.docstatus, user)
-            # ERPNext sets doc.status to payment workflow (e.g. "Unpaid"); clients use docstatus.
-            return {"success": True, "docstatus": int(doc.docstatus), "name": doc.name}
+            doc.reload()
+            logger.info("SUBMIT: success name=%s docstatus=%s status=%s user=%s", name, doc.docstatus, doc.status, user)
+            return {
+                "success": True,
+                "docstatus": int(doc.docstatus),
+                "name": doc.name,
+                "status": doc.status or "Paid",
+            }
 
         _app_db().get_doc(doctype, name, verify_tenant=True)
         logger.info("SUBMIT (frappe.client.submit): %s %s user=%s", doctype, name, user)
