@@ -182,6 +182,8 @@ def _default_get_value(doctype, filters, field=None, **kwargs):
         # _resolve_company_from_user: no user default → fall back to doc company
         return None
     if doctype == "Item":
+        if field == "item_group":
+            return None
         # _resolve_item_code: item already exists — return it as-is
         return filters
     if doctype == "Item Default":
@@ -1346,7 +1348,7 @@ def test_custom_fields_empty_when_no_items():
 
 
 def test_custom_fields_default_item_group_when_missing():
-    """When item_group is absent, expense_item_group falls back to 'All Item Groups'."""
+    """When item_group is absent, expense_item_group falls back to Item master then 'All Item Groups'."""
     mock_frappe.db.get_value.side_effect = _default_get_value
     mock_frappe.get_all.side_effect = _default_get_all
 
@@ -1361,6 +1363,31 @@ def test_custom_fields_default_item_group_when_missing():
     assert doc.expense_item_name == "Stationery"
     assert doc.expense_item_group == "All Item Groups"
     assert doc.expense_items_count == 1
+
+
+def test_custom_fields_use_item_master_group_when_line_group_missing():
+    """When line item_group is absent, use Item.item_group before defaulting."""
+    def get_value(doctype, filters, field=None, **kwargs):
+        if doctype == "Item":
+            if field == "name":
+                return filters
+            if field == "item_group":
+                return "Office Supplies"
+        return _default_get_value(doctype, filters, field, **kwargs)
+
+    mock_frappe.db.get_value.side_effect = get_value
+    mock_frappe.get_all.side_effect = _default_get_all
+
+    doc = PurchaseInvoice({
+        "doctype": "Purchase Invoice",
+        "company": "Acme Pty Ltd",
+        "items": [{"item_code": "Printer Paper", "rate": 25.0}],
+    })
+
+    doc.before_validate()
+
+    assert doc.expense_item_group == "Office Supplies"
+    assert doc.items[0]["item_group"] == "Office Supplies"
 
 
 def test_custom_fields_survive_gst_enrichment():

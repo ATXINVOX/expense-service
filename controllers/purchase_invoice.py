@@ -1471,13 +1471,27 @@ def _resolve_item_code(item_name: str, item_group: str) -> str:
         return item_name
 
 
+def _resolve_item_group(item: Any, lookup_code: str | None) -> str:
+    item_group = _value(item, "item_group", None)
+    if item_group and str(item_group).strip():
+        return str(item_group).strip()
+
+    if lookup_code:
+        from_item = _app_db().get_value("Item", lookup_code, "item_group")
+        if from_item and str(from_item).strip():
+            return str(from_item).strip()
+
+    return "All Item Groups"
+
+
 def _resolve_item_identity(item: Any) -> tuple[str | None, str | None]:
-    item_group = _value(item, "item_group", None) or "All Item Groups"
     item_code = _value(item, "item_code")
     item_name = _value(item, "item_name")
 
     preferred_name = str(item_name).strip() if item_name else None
     candidate_code = str(item_code).strip() if item_code else None
+    lookup_code = candidate_code or preferred_name
+    item_group = _resolve_item_group(item, lookup_code)
 
     if preferred_name:
         if not candidate_code or candidate_code == item_group:
@@ -1570,8 +1584,10 @@ class PurchaseInvoice(DocumentController):
                 self.append("items", item_data)
                 continue
 
-            resolved_code = _resolve_item_code(item_code, item_group)
+            resolved_group = _ensure_item_group(item_group)
+            resolved_code = _resolve_item_code(item_code, resolved_group)
             _set_value(item_data, "item_code", resolved_code)
+            _set_value(item_data, "item_group", resolved_group)
             if _value(item_data, "item_name"):
                 _set_value(item_data, "item_name", item_code)
 
@@ -1585,8 +1601,12 @@ class PurchaseInvoice(DocumentController):
 
             if idx == 0:
                 primary_item_name = item_code
-                primary_item_group = item_group
-                logger.debug("before_validate: primary item=%s group=%s", item_code, item_group)
+                primary_item_group = resolved_group
+                logger.debug(
+                    "before_validate: primary item=%s group=%s",
+                    item_code,
+                    resolved_group,
+                )
 
         _set_value(self, "expense_item_name", primary_item_name or "")
         _set_value(self, "expense_item_group", primary_item_group or "")
