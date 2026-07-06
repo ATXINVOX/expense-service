@@ -1792,12 +1792,14 @@ def test_project_purchase_invoice_api_coerces_types():
         "docstatus": 0,
         "grand_total": 13.5,
         "currency": "AUD",
+        "receipt_image": "http://kong/receipt.webp",
         "expense_item_name": "Milk 2L",
         "expense_item_group": "Groceries",
         "expense_items_count": 1,
     }
     out = _project_purchase_invoice_api(doc)
     assert out["id"] == "ACC-PINV-1"
+    assert out["receipt_image"] == "http://kong/receipt.webp"
     assert out["posting_date"] == "2026-04-08"
     assert out["items"][0]["qty"] == 3.0
     assert out["grand_total"] == 13.5

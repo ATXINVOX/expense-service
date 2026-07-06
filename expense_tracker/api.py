@@ -1015,6 +1015,8 @@ def _to_api_float(val):
 
 def _project_purchase_invoice_api(doc):
     """Slim JSON for mobile: same fields clients send on POST + id and a few total."""
+    from expense_tracker.receipt_attachment import resolve_receipt_image_url
+
     d = doc.as_dict() if hasattr(doc, "as_dict") else dict(doc)
     items_out = []
     for row in d.get("items") or []:
@@ -1056,7 +1058,7 @@ def _project_purchase_invoice_api(doc):
         "docstatus": d.get("docstatus"),
         "grand_total": _to_api_float(d.get("grand_total")),
         "currency": d.get("currency"),
-        "receipt_image": getattr(doc, "receipt_image", None) or d.get("receipt_image"),
+        "receipt_image": resolve_receipt_image_url(name, d),
         "expense_item_name": d.get("expense_item_name") or "",
         "expense_item_group": d.get("expense_item_group") or "",
         "expense_items_count": int(d.get("expense_items_count") or 0),

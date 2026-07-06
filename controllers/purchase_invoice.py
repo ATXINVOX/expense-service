@@ -45,6 +45,7 @@ EXPENSE_CUSTOM_COLUMNS = [
     ("expense_item_name", "varchar(140)"),
     ("expense_item_group", "varchar(140)"),
     ("expense_items_count", "int(11) DEFAULT 0"),
+    ("receipt_image", "text"),
 ]
 
 
@@ -68,6 +69,8 @@ def _ensure_expense_custom_columns():
     for col_name, col_type in EXPENSE_CUSTOM_COLUMNS:
         try:
             fieldtype = "Link" if col_name == "expense_item_group" else ("Int" if "count" in col_name else "Data")
+            if col_name == "receipt_image":
+                fieldtype = "Attach"
             options = "Item Group" if col_name == "expense_item_group" else ""
             frappe.db.sql("""
                 INSERT IGNORE INTO `tabCustom Field`
