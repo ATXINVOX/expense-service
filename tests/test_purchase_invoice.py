@@ -1837,6 +1837,7 @@ def test_create_purchase_invoice_returns_201_with_slim_body():
         "supplier": "aavin",
         "posting_date": "2026-04-08",
         "remarks": "Grocery",
+        "receipt_image": "http://kong/api/method/download_file?storage_key=receipt.webp",
         "items": [{"item_code": "Milk", "item_group": "G", "qty": 1, "rate": 2.0}],
     }
     mock_doc = MagicMock()
@@ -1858,6 +1859,7 @@ def test_create_purchase_invoice_returns_201_with_slim_body():
         "docstatus": 0,
         "grand_total": 2.0,
         "currency": "AUD",
+        "receipt_image": "http://kong/api/method/download_file?storage_key=receipt.webp",
     }
     mock_app.tenant_db.insert_doc.return_value = mock_doc
 
@@ -1867,6 +1869,8 @@ def test_create_purchase_invoice_returns_201_with_slim_body():
     assert out["success"] is True
     assert out["doctype"] == "Purchase Invoice"
     assert out["id"] == "ACC-NEW"
+    insert_args = mock_app.tenant_db.insert_doc.call_args
+    assert insert_args[0][1]["receipt_image"] == "http://kong/api/method/download_file?storage_key=receipt.webp"
     mock_app.tenant_db.insert_doc.assert_called_once()
 
 
