@@ -899,7 +899,7 @@ def test_dashboard_recent_expenses_outside_period_with_tenant_visibility():
         if c.args and c.args[0] == "Purchase Invoice"
     ]
     assert len(recent_calls) == 1
-    assert recent_calls[0].kwargs.get("order_by") == "modified desc"
+    assert recent_calls[0].kwargs.get("order_by") == "posting_date desc, creation desc"
     assert recent_calls[0].kwargs.get("or_filters") == [
         ["tenant_id", "=", "test-tenant-001"],
         ["tenant_id", "=", "SYSTEM"],

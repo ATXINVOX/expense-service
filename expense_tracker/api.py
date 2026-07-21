@@ -439,7 +439,7 @@ def _fetch_recent_purchase_invoices(company: str, limit: int, fields: list[str])
             filters=base_filters,
             or_filters=_tenant_or_filters(tenant_id),
             fields=fields,
-            order_by="modified desc",
+            order_by="posting_date desc, creation desc",
             limit=row_limit,
         )
 
@@ -447,7 +447,7 @@ def _fetch_recent_purchase_invoices(company: str, limit: int, fields: list[str])
         "Purchase Invoice",
         filters=base_filters,
         fields=fields,
-        order_by="modified desc",
+        order_by="posting_date desc, creation desc",
         limit=row_limit,
     )
 
@@ -490,7 +490,7 @@ def _fetch_recent_sales_invoices(company: str, limit: int):
 
 
 def _recent_expenses_from_rows(rows, limit: int = 10) -> list[dict]:
-    """Project dashboard recent expenses (rows already ordered by modified desc)."""
+    """Project dashboard recent expenses (rows already ordered by posting_date desc, creation desc)."""
     out = []
     for row in (rows or [])[: max(1, min(int(limit or 10), 50))]:
         out.append(
