@@ -2040,3 +2040,99 @@ def test_delete_purchase_invoice_cancelled_uses_force_delete():
     )
 
 
+def test_delete_purchase_invoice_cleans_up_receipt_file():
+    receipt_url = "http://kong/api/method/download_file?storage_key=k1"
+    mock_frappe.defaults = MagicMock()
+    mock_frappe.defaults.get_user_default.return_value = "Acme Pty Ltd"
+
+    def _gv(*args, **kwargs):
+        if args and args[0] == "Purchase Invoice":
+            return {"docstatus": 0, "company": "Acme Pty Ltd", "receipt_image": receipt_url}
+        return None
+
+    mock_frappe.db.get_value.side_effect = _gv
+
+    with patch("expense_tracker.receipt_attachment.delete_receipt_file") as del_file:
+        result = delete_purchase_invoice("user@example.com", "PI-RC")
+
+    assert result["success"] is True
+    del_file.assert_called_once_with(receipt_url)
+
+
+def test_update_purchase_invoice_deletes_old_receipt_on_replace(monkeypatch):
+    old_url = "http://kong/api/method/download_file?storage_key=old"
+    new_url = "http://kong/api/method/download_file?storage_key=new"
+    sys.modules["flask"].request.get_json.return_value = {
+        "receipt_image": new_url,
+        "company": "Acme Pty Ltd",
+    }
+    mock_frappe.defaults = MagicMock()
+    mock_frappe.defaults.get_user_default.return_value = "Acme Pty Ltd"
+    mock_frappe.db.get_value.side_effect = None
+    mock_frappe.db.get_value.return_value = {
+        "docstatus": 0,
+        "company": "Acme Pty Ltd",
+        "receipt_image": old_url,
+    }
+
+    mock_doc = MagicMock()
+    mock_doc.name = "ACC-PINV-RC"
+    mock_doc.docstatus = 0
+    mock_app.tenant_db.get_doc.return_value = mock_doc
+    mock_app.tenant_db.hooks.run_hooks = MagicMock()
+
+    monkeypatch.setattr(
+        "expense_tracker.api.normalize_purchase_invoice_payment_dates", lambda doc: None
+    )
+    monkeypatch.setattr(
+        "expense_tracker.api._project_purchase_invoice_api", lambda doc: {"name": doc.name}
+    )
+    monkeypatch.setattr(
+        "expense_tracker.api.ensure_purchase_invoice_item_defaults", MagicMock()
+    )
+
+    with patch("expense_tracker.receipt_attachment.delete_receipt_file") as del_file:
+        result = update_purchase_invoice("user@example.com", "ACC-PINV-RC")
+
+    assert result["success"] is True
+    del_file.assert_called_once_with(old_url)
+
+
+def test_update_purchase_invoice_keeps_receipt_when_not_replaced(monkeypatch):
+    old_url = "http://kong/api/method/download_file?storage_key=old"
+    sys.modules["flask"].request.get_json.return_value = {
+        "supplier": "New Supplier",
+        "company": "Acme Pty Ltd",
+    }
+    mock_frappe.defaults = MagicMock()
+    mock_frappe.defaults.get_user_default.return_value = "Acme Pty Ltd"
+    mock_frappe.db.get_value.side_effect = None
+    mock_frappe.db.get_value.return_value = {
+        "docstatus": 0,
+        "company": "Acme Pty Ltd",
+        "receipt_image": old_url,
+    }
+
+    mock_doc = MagicMock()
+    mock_doc.name = "ACC-PINV-KEEP"
+    mock_doc.docstatus = 0
+    mock_app.tenant_db.get_doc.return_value = mock_doc
+    mock_app.tenant_db.hooks.run_hooks = MagicMock()
+
+    monkeypatch.setattr(
+        "expense_tracker.api.normalize_purchase_invoice_payment_dates", lambda doc: None
+    )
+    monkeypatch.setattr(
+        "expense_tracker.api._project_purchase_invoice_api", lambda doc: {"name": doc.name}
+    )
+    monkeypatch.setattr(
+        "expense_tracker.api.ensure_purchase_invoice_item_defaults", MagicMock()
+    )
+
+    with patch("expense_tracker.receipt_attachment.delete_receipt_file") as del_file:
+        result = update_purchase_invoice("user@example.com", "ACC-PINV-KEEP")
+
+    assert result["success"] is True
+    del_file.assert_not_called()
+
+

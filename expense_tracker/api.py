@@ -1139,7 +1139,7 @@ def update_purchase_invoice(user, name):
         row = frappe.db.get_value(
             "Purchase Invoice",
             nm,
-            ["docstatus", "company"],
+            ["docstatus", "company", "receipt_image"],
             as_dict=True,
         )
         if not row:
@@ -1188,6 +1188,15 @@ def update_purchase_invoice(user, name):
             doc.save()
             frappe.db.commit()
             _app_db().hooks.run_hooks(doc, "after_update")
+
+            # Receipt replaced: delete the file the invoice no longer points at.
+            if "receipt_image" in update_data:
+                old_receipt = (row.get("receipt_image") or "").strip()
+                new_receipt = (update_data.get("receipt_image") or "").strip()
+                if old_receipt and old_receipt != new_receipt:
+                    from expense_tracker.receipt_attachment import delete_receipt_file
+
+                    delete_receipt_file(old_receipt)
 
         if should_submit:
             submitted = _submit_purchase_invoice_by_name(user, nm)
@@ -1243,7 +1252,7 @@ def delete_purchase_invoice(user, name):
         row = frappe.db.get_value(
             "Purchase Invoice",
             name,
-            ["docstatus", "company"],
+            ["docstatus", "company", "receipt_image"],
             as_dict=True,
         )
         if not row:
@@ -1289,6 +1298,11 @@ def delete_purchase_invoice(user, name):
 
         _app_db().delete_doc("Purchase Invoice", name, **delete_kwargs)
         logger.info("DELETE_PI: success name=%s user=%s", name, user)
+
+        # Best-effort cleanup of the receipt's stored file now the invoice is gone.
+        from expense_tracker.receipt_attachment import delete_receipt_file
+
+        delete_receipt_file(row.get("receipt_image"))
 
         return {
             "success": True,
