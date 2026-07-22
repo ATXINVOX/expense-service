@@ -137,6 +137,85 @@ def _breakdown_top_categories(
     return head
 
 
+def _build_expense_category_breakdown(invoices: list, db) -> dict:
+    """Category totals for dashboard Top Spend + pie, aligned with invoice ``grand_total``.
+
+    Strategy:
+    1. Prefer child-line ``amount`` by ``item_group`` when rows include ``parent``.
+    2. For each period invoice, if line total is missing or below ``grand_total``, add
+       the residual to denormalised ``expense_item_group`` (covers aggregation gaps,
+       empty child tables, and tax residual).
+    3. If the child query only returns legacy group_by rows (no ``parent``) and their
+       sum does not match period ``grand_total``, rebuild from parent fields so a large
+       invoice cannot inflate Total Expenses while staying invisible to Top Spend.
+
+    Goal: a submitted Fuel invoice of $3,007.65 must rank above Equipment $628 in
+    ``top_category`` whenever it is included in ``total_spend``.
+    """
+    breakdown: dict = {}
+    if not invoices:
+        return breakdown
+
+    invoice_names = [row.get("name") for row in invoices if row.get("name")]
+    invoice_total = sum(_as_number(inv.get("grand_total")) for inv in invoices)
+    line_total_by_parent: dict = {}
+    has_parent_attr = False
+
+    if invoice_names:
+        # Prefer raw lines over DB group_by SUM — tenant adapters have been observed to
+        # under-return aggregated child rows while still listing the parent invoices.
+        invoice_items = db.get_all(
+            "Purchase Invoice Item",
+            filters=[
+                ["parenttype", "=", "Purchase Invoice"],
+                ["parent", "in", invoice_names],
+            ],
+            fields=["parent", "item_group", "amount"],
+        )
+        for row in invoice_items or []:
+            amount = _as_number(row.get("amount"))
+            if amount == 0.0 and row.get("amount") is None:
+                # Legacy group_by shape: {item_group, total} or {item_group, amount}
+                amount = _as_number(row.get("total"))
+            group = row.get("item_group") or "Uncategorised"
+            breakdown[group] = breakdown.get(group, 0.0) + amount
+            parent = row.get("parent")
+            if parent:
+                has_parent_attr = True
+                line_total_by_parent[parent] = (
+                    line_total_by_parent.get(parent, 0.0) + amount
+                )
+
+        if not has_parent_attr:
+            line_sum_all = sum(breakdown.values())
+            # Complete legacy aggregation — keep it.
+            if line_sum_all > 0 and abs(line_sum_all - invoice_total) < 0.02:
+                return breakdown
+            # Incomplete or empty: rebuild from parent denormalised category + grand_total.
+            breakdown = {}
+            for inv in invoices:
+                group = inv.get("expense_item_group") or "Uncategorised"
+                grand = _as_number(inv.get("grand_total"))
+                if grand > 0:
+                    breakdown[group] = breakdown.get(group, 0.0) + grand
+            return breakdown
+
+    # Parent-aware path: top up any invoice not fully covered by its lines.
+    for inv in invoices:
+        name = inv.get("name")
+        grand = _as_number(inv.get("grand_total"))
+        if grand <= 0:
+            continue
+        covered = line_total_by_parent.get(name, 0.0) if name else 0.0
+        residual = grand - covered
+        if residual <= 0.009:
+            continue
+        group = inv.get("expense_item_group") or "Uncategorised"
+        breakdown[group] = breakdown.get(group, 0.0) + residual
+
+    return breakdown
+
+
 def _parse_posting_date_value(pd):
     """Normalize Purchase Invoice ``posting_date`` to a ``date`` or ``None``.
 
@@ -1412,34 +1491,7 @@ def get_dashboard_summary(user, from_date=None, to_date=None):
 
     recent_rows = _fetch_recent_purchase_invoices(company, recent_limit, inv_fields)
 
-    breakdown = {}
-    if invoices:
-        invoice_names = [row.get("name") for row in invoices]
-        invoice_items = db.get_all(
-            "Purchase Invoice Item",
-            filters=[
-                ["parenttype", "=", "Purchase Invoice"],
-                ["parent", "in", invoice_names],
-            ],
-            # Let DB perform category aggregation; Python keeps only normalization.
-            fields=["item_group", {"SUM": "amount", "as": "total"}],
-            group_by="item_group",
-        )
-        for row in invoice_items or []:
-            item_group = row.get("item_group") or "Uncategorised"
-            total = row.get("total")
-            if total is None:
-                # Backward-compat for mocks/older adapters that may still return raw rows.
-                total = row.get("amount")
-            breakdown[item_group] = breakdown.get(item_group, 0.0) + _as_number(total)
-        if not breakdown:
-            # Fallback for environments where child table aggregation is restricted/empty:
-            # aggregate by the controller-populated primary item group on Purchase Invoice.
-            for row in invoices or []:
-                item_group = row.get("expense_item_group") or "Uncategorised"
-                breakdown[item_group] = breakdown.get(item_group, 0.0) + _as_number(
-                    row.get("grand_total")
-                )
+    breakdown = _build_expense_category_breakdown(invoices or [], db)
 
     total_spend = sum(_as_number(row.get("grand_total")) for row in invoices or [])
     gst_total = sum(_as_number(row.get("total_taxes_and_charges")) for row in invoices or [])
@@ -1447,10 +1499,11 @@ def get_dashboard_summary(user, from_date=None, to_date=None):
     currency = db.get_value("Company", company, "default_currency") or "AUD"
 
     breakdown_rows = [
-        {"item_group": item_group, "total": total}
+        {"item_group": item_group, "total": round(total, 2)}
         for item_group, total in sorted(
             breakdown.items(), key=lambda item: item[1], reverse=True
         )
+        if total > 0
     ]
 
     period_label_out = (
