@@ -636,6 +636,95 @@ def test_dashboard_summary_fallbacks_to_invoice_level_item_group_when_child_quer
     assert result["breakdown"][0]["total"] == 120.0
 
 
+def test_dashboard_summary_top_category_includes_invoice_missing_from_child_agg():
+    """Regression: large submitted invoice in total_spend must win Top Spend.
+
+    Reproduces the mobile bug where recent showed Fuel $3,007.65 Paid but
+    top_category stayed Equipment $628 because child aggregation under-returned.
+    """
+    mock_frappe.defaults = MagicMock()
+    mock_frappe.defaults.get_user_default.return_value = "Acme Pty Ltd"
+    mock_frappe.db.get_value.return_value = "AUD"
+    mock_app.db.get_all.side_effect = [
+        [
+            {
+                "name": "ACC-PINV-2026-00061",
+                "grand_total": 3007.65,
+                "total_taxes_and_charges": 273.42,
+                "expense_item_group": "Fuel",
+            },
+            {
+                "name": "PI-EQ",
+                "grand_total": 628.0,
+                "total_taxes_and_charges": 0.0,
+                "expense_item_group": "Equipment",
+            },
+            {
+                "name": "PI-FUEL-SMALL",
+                "grand_total": 70.6,
+                "total_taxes_and_charges": 0.0,
+                "expense_item_group": "Fuel",
+            },
+        ],
+        # Incomplete child aggregation (missing the $3007.65 line entirely).
+        [
+            {"parent": "PI-EQ", "item_group": "Equipment", "amount": 628.0},
+            {"parent": "PI-FUEL-SMALL", "item_group": "Fuel", "amount": 70.6},
+        ],
+    ]
+
+    result = get_dashboard_summary("test_user")
+
+    assert result["total_spend"] == 3706.25
+    fuel = next(r for r in result["breakdown"] if r["item_group"] == "Fuel")
+    equipment = next(r for r in result["breakdown"] if r["item_group"] == "Equipment")
+    assert fuel["total"] == 3078.25  # 3007.65 residual + 70.6 line
+    assert equipment["total"] == 628.0
+    assert result["breakdown"][0]["item_group"] == "Fuel"
+
+    # Preset path sets top_category; legacy month-to-date path may not.
+    # Force preset month for top_category assertion.
+    sys.modules["flask"].request.args = _FakeArgs({"period": "month"})
+    fixed_today = date(2026, 7, 22)
+    mock_app.db.get_all.side_effect = [
+        [
+            {
+                "name": "ACC-PINV-2026-00061",
+                "grand_total": 3007.65,
+                "total_taxes_and_charges": 273.42,
+                "expense_item_group": "Fuel",
+                "posting_date": fixed_today,
+            },
+            {
+                "name": "PI-EQ",
+                "grand_total": 628.0,
+                "total_taxes_and_charges": 0.0,
+                "expense_item_group": "Equipment",
+                "posting_date": fixed_today,
+            },
+            {
+                "name": "PI-FUEL-SMALL",
+                "grand_total": 70.6,
+                "total_taxes_and_charges": 0.0,
+                "expense_item_group": "Fuel",
+                "posting_date": fixed_today,
+            },
+        ],
+        [
+            {"parent": "PI-EQ", "item_group": "Equipment", "amount": 628.0},
+            {"parent": "PI-FUEL-SMALL", "item_group": "Fuel", "amount": 70.6},
+        ],
+        [{"grand_total": 100.0}],  # previous period
+    ]
+    with patch("expense_tracker.api.date", _date_class_with_fixed_today(fixed_today)), patch(
+        "expense_tracker.api._get_frappe_today", return_value=fixed_today
+    ):
+        preset = get_dashboard_summary("test_user")
+
+    assert preset["top_category"]["item_group"] == "Fuel"
+    assert preset["top_category"]["total"] == 3078.25
+
+
 class _FakeArgs:
     def __init__(self, data):
         self._data = data
@@ -899,7 +988,7 @@ def test_dashboard_recent_expenses_outside_period_with_tenant_visibility():
         if c.args and c.args[0] == "Purchase Invoice"
     ]
     assert len(recent_calls) == 1
-    assert recent_calls[0].kwargs.get("order_by") == "modified desc"
+    assert recent_calls[0].kwargs.get("order_by") == "posting_date desc, creation desc"
     assert recent_calls[0].kwargs.get("or_filters") == [
         ["tenant_id", "=", "test-tenant-001"],
         ["tenant_id", "=", "SYSTEM"],
@@ -2038,5 +2127,101 @@ def test_delete_purchase_invoice_cancelled_uses_force_delete():
         force=True,
         ignore_permissions=True,
     )
+
+
+def test_delete_purchase_invoice_cleans_up_receipt_file():
+    receipt_url = "http://kong/api/method/download_file?storage_key=k1"
+    mock_frappe.defaults = MagicMock()
+    mock_frappe.defaults.get_user_default.return_value = "Acme Pty Ltd"
+
+    def _gv(*args, **kwargs):
+        if args and args[0] == "Purchase Invoice":
+            return {"docstatus": 0, "company": "Acme Pty Ltd", "receipt_image": receipt_url}
+        return None
+
+    mock_frappe.db.get_value.side_effect = _gv
+
+    with patch("expense_tracker.receipt_attachment.delete_receipt_file") as del_file:
+        result = delete_purchase_invoice("user@example.com", "PI-RC")
+
+    assert result["success"] is True
+    del_file.assert_called_once_with(receipt_url)
+
+
+def test_update_purchase_invoice_deletes_old_receipt_on_replace(monkeypatch):
+    old_url = "http://kong/api/method/download_file?storage_key=old"
+    new_url = "http://kong/api/method/download_file?storage_key=new"
+    sys.modules["flask"].request.get_json.return_value = {
+        "receipt_image": new_url,
+        "company": "Acme Pty Ltd",
+    }
+    mock_frappe.defaults = MagicMock()
+    mock_frappe.defaults.get_user_default.return_value = "Acme Pty Ltd"
+    mock_frappe.db.get_value.side_effect = None
+    mock_frappe.db.get_value.return_value = {
+        "docstatus": 0,
+        "company": "Acme Pty Ltd",
+        "receipt_image": old_url,
+    }
+
+    mock_doc = MagicMock()
+    mock_doc.name = "ACC-PINV-RC"
+    mock_doc.docstatus = 0
+    mock_app.tenant_db.get_doc.return_value = mock_doc
+    mock_app.tenant_db.hooks.run_hooks = MagicMock()
+
+    monkeypatch.setattr(
+        "expense_tracker.api.normalize_purchase_invoice_payment_dates", lambda doc: None
+    )
+    monkeypatch.setattr(
+        "expense_tracker.api._project_purchase_invoice_api", lambda doc: {"name": doc.name}
+    )
+    monkeypatch.setattr(
+        "expense_tracker.api.ensure_purchase_invoice_item_defaults", MagicMock()
+    )
+
+    with patch("expense_tracker.receipt_attachment.delete_receipt_file") as del_file:
+        result = update_purchase_invoice("user@example.com", "ACC-PINV-RC")
+
+    assert result["success"] is True
+    del_file.assert_called_once_with(old_url)
+
+
+def test_update_purchase_invoice_keeps_receipt_when_not_replaced(monkeypatch):
+    old_url = "http://kong/api/method/download_file?storage_key=old"
+    sys.modules["flask"].request.get_json.return_value = {
+        "supplier": "New Supplier",
+        "company": "Acme Pty Ltd",
+    }
+    mock_frappe.defaults = MagicMock()
+    mock_frappe.defaults.get_user_default.return_value = "Acme Pty Ltd"
+    mock_frappe.db.get_value.side_effect = None
+    mock_frappe.db.get_value.return_value = {
+        "docstatus": 0,
+        "company": "Acme Pty Ltd",
+        "receipt_image": old_url,
+    }
+
+    mock_doc = MagicMock()
+    mock_doc.name = "ACC-PINV-KEEP"
+    mock_doc.docstatus = 0
+    mock_app.tenant_db.get_doc.return_value = mock_doc
+    mock_app.tenant_db.hooks.run_hooks = MagicMock()
+
+    monkeypatch.setattr(
+        "expense_tracker.api.normalize_purchase_invoice_payment_dates", lambda doc: None
+    )
+    monkeypatch.setattr(
+        "expense_tracker.api._project_purchase_invoice_api", lambda doc: {"name": doc.name}
+    )
+    monkeypatch.setattr(
+        "expense_tracker.api.ensure_purchase_invoice_item_defaults", MagicMock()
+    )
+
+    with patch("expense_tracker.receipt_attachment.delete_receipt_file") as del_file:
+        result = update_purchase_invoice("user@example.com", "ACC-PINV-KEEP")
+
+    assert result["success"] is True
+    del_file.assert_not_called()
 
 
